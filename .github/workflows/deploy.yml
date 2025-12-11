@@ -22,5 +22,9 @@ jobs:
 
     - name: Deploy to Raspberry Pi
       run: |
-        ssh pi@192.168.1.86 "cd /home/pi/boxbot && git pull && sudo systemctl restart boxbot.service"
+        ssh pi@192.168.1.86 "
+          cd /home/pi/boxbot/ТГ_БОТ_КОРОБОЧКИ && \
+          git pull && \
+          sudo systemctl restart boxbot.service
+        "
 
