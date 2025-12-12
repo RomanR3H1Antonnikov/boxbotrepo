@@ -1,4 +1,4 @@
-name: Deploy to Raspberry Pi
+name: Deploy to Raspberry Pi (self-hosted)
 
 on:
   push:
@@ -7,15 +7,30 @@ on:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: self-hosted
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Pull latest changes on Raspberry Pi
-      run: |
-        cd /home/pi/boxbot/ТГ_БОТ_КОРОБОЧКИ
-        git pull
-        sudo systemctl restart boxbot.service
+      - name: Show environment (debug)
+        run: |
+          whoami
+          hostname
+          pwd
+
+      - name: Deploy bot
+        run: |
+          set -e
+          cd /home/pi/boxbot
+          git pull origin master
+
+      - name: Restart service
+        run: |
+          sudo systemctl restart boxbot.service
+
+      - name: Health check
+        run: |
+          sleep 5
+          systemctl is-active boxbot.service
 
