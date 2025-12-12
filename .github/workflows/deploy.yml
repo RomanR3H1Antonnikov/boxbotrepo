@@ -1,4 +1,4 @@
-name: Deploy to Raspberry Pi
+name: Deploy to Raspberry Pi (self-hosted)
 
 on:
   push:
@@ -7,24 +7,29 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up SSH keys
-      run: |
-        mkdir -p ~/.ssh
-        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        ssh-keyscan -t rsa 192.168.1.86 >> ~/.ssh/known_hosts
+      - name: Show environment (debug)
+        run: |
+          whoami
+          hostname
+          pwd
 
-    - name: Deploy to Raspberry Pi
-      run: |
-        ssh pi@192.168.1.86 "
-          cd /home/pi/boxbot/ТГ_БОТ_КОРОБОЧКИ && \
-          git pull && \
+      - name: Deploy bot
+        run: |
+          cd /home/pi/boxbot
+          git pull origin master
+
+      - name: Restart service
+        run: |
           sudo systemctl restart boxbot.service
-        "
+
+      - name: Health check
+        run: |
+          sleep 5
+          systemctl is-active boxbot.service
 
