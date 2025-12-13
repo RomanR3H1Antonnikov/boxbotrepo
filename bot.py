@@ -364,9 +364,9 @@ ADMIN_ID = 1049170524
 bot = Bot(
     Config.TOKEN,
     default=DefaultBotProperties(
-        parse_mode=ParseMode.HTML,
-        proxy="socks5://159.112.235.249:7492"  # рабочий прокси для Telegram
-    )
+        parse_mode=ParseMode.HTML
+    ),
+    proxy="socks5://t.me/socks?server=149.154.160.1&port=443&user=telegram&pass=telegram"
 )
 dp = Dispatcher()
 r = Router()
