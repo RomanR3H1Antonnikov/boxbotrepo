@@ -365,7 +365,7 @@ bot = Bot(
     Config.TOKEN,
     default=DefaultBotProperties(
         parse_mode=ParseMode.HTML,
-        proxy="socks5://185.199.229.156:7492"  # рабочий прокси для Telegram
+        proxy="socks5://159.112.235.249:7492"  # рабочий прокси для Telegram
     )
 )
 dp = Dispatcher()
