@@ -361,7 +361,13 @@ ADMIN_USERNAMES = {"@RE_HY"}
 ADMIN_ID = 1049170524
 
 # ========== BOOTSTRAP ==========
-bot = Bot(Config.TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(
+    Config.TOKEN,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML,
+        proxy="socks5://185.199.229.156:7492"  # рабочий прокси для Telegram
+    )
+)
 dp = Dispatcher()
 r = Router()
 dp.include_router(r)
@@ -2275,7 +2281,13 @@ async def check_all_shipped_orders():
 async def main():
     logger.info("Бот запущен")
     asyncio.create_task(check_all_shipped_orders())
-    await dp.start_polling(bot)
+    while True:
+        try:
+            logger.info("Попытка подключения к Telegram...")
+            await dp.start_polling(bot)
+        except Exception as e:
+            logger.error(f"Ошибка подключения: {e}. Повтор через 15 секунд...")
+            await asyncio.sleep(15)
 
 if __name__ == "__main__":
     asyncio.run(main())
