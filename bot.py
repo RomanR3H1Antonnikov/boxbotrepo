@@ -3,10 +3,14 @@ import re
 import asyncio
 import logging
 import requests
+import secrets
+import subprocess
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from enum import Enum
 from datetime import datetime, timedelta
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
@@ -22,6 +26,33 @@ from dotenv import load_dotenv
 
 # ========== CONFIG ==========
 load_dotenv()
+WEBHOOK_PORT = 8000
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") or secrets.token_hex(32)
+
+_TUNNEL_URL_RE = re.compile(r"(https://[a-z0-9-]+\.trycloudflare\.com)", re.I)
+
+async def start_cloudflared_and_get_url(local_port: int) -> str:
+    """
+    Запускает cloudflared в режиме quick tunnel и возвращает публичный https URL.
+    Важно: URL может меняться при рестарте — мы будем переустанавливать webhook на старте.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "cloudflared", "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{local_port}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    assert proc.stdout is not None
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            raise RuntimeError("cloudflared завершился до выдачи публичного URL")
+        s = line.decode("utf-8", errors="ignore").strip()
+        m = _TUNNEL_URL_RE.search(s)
+        if m:
+            return m.group(1)  # например https://xxxx.trycloudflare.com
+
 
 # ==============DATA=============
 STREET_KEYWORDS = [
@@ -66,7 +97,7 @@ async def get_cdek_token() -> Optional[str]:
     }
 
     try:
-        response = requests.post(url, data=data, timeout=15)
+        response = await asyncio.to_thread(requests.post, url, data=data, timeout=15)
         response.raise_for_status()
         token = response.json().get("access_token")
         if token:
@@ -372,7 +403,6 @@ dp = Dispatcher()
 r = Router()
 dp.include_router(r)
 
-state = BotState()
 def ustate(uid: int) -> UserState:
     return state.get_user(uid)
 
@@ -653,7 +683,6 @@ def reset_waiting_flags(st: UserState):
     st.awaiting_code = False
     st.awaiting_contact = False
     st.awaiting_pvz_address = False
-    st.awaiting_track_for_order = None
     st.awaiting_manual_pvz = False
 
 
@@ -2213,7 +2242,6 @@ async def check_all_shipped_orders():
                 if new_track and (not order.track or order.track.startswith("BOX")):
                     old_track = order.track
                     order.track = new_track
-                    await order.save()
 
                     # Красивое финальное сообщение клиенту — ТОЛЬКО ОДИН РАЗ!
                     await bot.send_message(
@@ -2279,15 +2307,37 @@ async def check_all_shipped_orders():
 
 # ========== ENTRYPOINT ==========
 async def main():
-    logger.info("Бот запущен")
+    logger.info("Бот запущен (webhook режим)")
+
+    # 1) Поднимаем aiohttp сервер (локально)
+    app = web.Application()
+    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", WEBHOOK_PORT)
+    await site.start()
+
+    # 2) Поднимаем cloudflared и получаем публичный URL
+    public_base = await start_cloudflared_and_get_url(WEBHOOK_PORT)
+    webhook_url = f"{public_base}{WEBHOOK_PATH}"
+
+    # 3) Ставим webhook в Telegram (каждый старт — чтобы переживать смену URL)
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(
+        url=webhook_url,
+        secret_token=WEBHOOK_SECRET,
+        allowed_updates=dp.resolve_used_update_types(),
+    )
+
+    logger.info(f"Webhook установлен: {webhook_url}")
+
+    # 4) Фоновая задача
     asyncio.create_task(check_all_shipped_orders())
-    while True:
-        try:
-            logger.info("Попытка подключения к Telegram...")
-            await dp.start_polling(bot)
-        except Exception as e:
-            logger.error(f"Ошибка подключения: {e}. Повтор через 15 секунд...")
-            await asyncio.sleep(15)
+
+    await asyncio.Event().wait()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
