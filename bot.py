@@ -3,8 +3,11 @@ import re
 import asyncio
 import logging
 import requests
+import aiohttp
 import secrets
 import subprocess
+import socket
+from aiohttp import TCPConnector
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from enum import Enum
@@ -393,10 +396,23 @@ ADMIN_USERNAMES = {"@RE_HY"}
 ADMIN_ID = 1049170524
 
 # ========== BOOTSTRAP ==========
+connector = TCPConnector(
+    family=socket.AF_INET,          # только IPv4
+    ssl=False,
+    limit=100,
+)
+
+session = aiohttp.ClientSession(
+    connector=connector,
+    timeout=aiohttp.ClientTimeout(total=30),
+)
+
 bot = Bot(
     Config.TOKEN,
+    session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
+
 dp = Dispatcher()
 r = Router()
 dp.include_router(r)
@@ -2310,7 +2326,10 @@ async def main():
     if USE_WEBHOOK:
         pass
     else:
-        await dp.start_polling(bot)
+        try:
+            await dp.start_polling(bot)
+        finally:
+            await session.close()
 
 
 if __name__ == "__main__":
