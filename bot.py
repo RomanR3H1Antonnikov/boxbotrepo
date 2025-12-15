@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from enum import Enum
 from datetime import datetime, timedelta
-from aiohttp import web
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+# from aiohttp import web
+# from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
@@ -25,33 +25,34 @@ from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 
 # ========== CONFIG ==========
+USE_WEBHOOK = False
 load_dotenv()
-WEBHOOK_PORT = 8000
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") or secrets.token_hex(32)
+# WEBHOOK_PORT = 8000
+# WEBHOOK_PATH = "/webhook"
+# WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") or secrets.token_hex(32)
 
-_TUNNEL_URL_RE = re.compile(r"(https://[a-z0-9-]+\.trycloudflare\.com)", re.I)
+# _TUNNEL_URL_RE = re.compile(r"(https://[a-z0-9-]+\.trycloudflare\.com)", re.I)
 
-async def start_cloudflared_and_get_url(local_port: int) -> str:
-    """
-    Запускает cloudflared в режиме quick tunnel и возвращает публичный https URL.
-    Важно: URL может меняться при рестарте — мы будем переустанавливать webhook на старте.
-    """
-    proc = await asyncio.create_subprocess_exec(
-        "cloudflared", "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{local_port}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-
-    assert proc.stdout is not None
-    while True:
-        line = await proc.stdout.readline()
-        if not line:
-            raise RuntimeError("cloudflared завершился до выдачи публичного URL")
-        s = line.decode("utf-8", errors="ignore").strip()
-        m = _TUNNEL_URL_RE.search(s)
-        if m:
-            return m.group(1)  # например https://xxxx.trycloudflare.com
+# async def start_cloudflared_and_get_url(local_port: int) -> str:
+#     """
+#     Запускает cloudflared в режиме quick tunnel и возвращает публичный https URL.
+#     Важно: URL может меняться при рестарте — мы будем переустанавливать webhook на старте.
+#     """
+#     proc = await asyncio.create_subprocess_exec(
+#         "cloudflared", "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{local_port}",
+#         stdout=asyncio.subprocess.PIPE,
+#         stderr=asyncio.subprocess.STDOUT,
+#     )
+#
+#     assert proc.stdout is not None
+#     while True:
+#         line = await proc.stdout.readline()
+#         if not line:
+#             raise RuntimeError("cloudflared завершился до выдачи публичного URL")
+#         s = line.decode("utf-8", errors="ignore").strip()
+#         m = _TUNNEL_URL_RE.search(s)
+#         if m:
+#             return m.group(1)  # например https://xxxx.trycloudflare.com
 
 
 # ==============DATA=============
@@ -394,10 +395,7 @@ ADMIN_ID = 1049170524
 # ========== BOOTSTRAP ==========
 bot = Bot(
     Config.TOKEN,
-    default=DefaultBotProperties(
-        parse_mode=ParseMode.HTML
-    ),
-    proxy="socks5://t.me/socks?server=149.154.160.1&port=443&user=telegram&pass=telegram"
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher()
 r = Router()
@@ -2307,36 +2305,12 @@ async def check_all_shipped_orders():
 
 # ========== ENTRYPOINT ==========
 async def main():
-    logger.info("Бот запущен (webhook режим)")
-
-    # 1) Поднимаем aiohttp сервер (локально)
-    app = web.Application()
-    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
-    setup_application(app, dp, bot=bot)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", WEBHOOK_PORT)
-    await site.start()
-
-    # 2) Поднимаем cloudflared и получаем публичный URL
-    public_base = await start_cloudflared_and_get_url(WEBHOOK_PORT)
-    webhook_url = f"{public_base}{WEBHOOK_PATH}"
-
-    # 3) Ставим webhook в Telegram (каждый старт — чтобы переживать смену URL)
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(
-        url=webhook_url,
-        secret_token=WEBHOOK_SECRET,
-        allowed_updates=dp.resolve_used_update_types(),
-    )
-
-    logger.info(f"Webhook установлен: {webhook_url}")
-
-    # 4) Фоновая задача
+    logger.info("Бот запущен")
     asyncio.create_task(check_all_shipped_orders())
-
-    await asyncio.Event().wait()
+    if USE_WEBHOOK:
+        pass
+    else:
+        await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
