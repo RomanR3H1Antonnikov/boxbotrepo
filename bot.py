@@ -396,20 +396,8 @@ ADMIN_USERNAMES = {"@RE_HY"}
 ADMIN_ID = 1049170524
 
 # ========== BOOTSTRAP ==========
-connector = TCPConnector(
-    family=socket.AF_INET,          # только IPv4
-    ssl=False,
-    limit=100,
-)
-
-session = aiohttp.ClientSession(
-    connector=connector,
-    timeout=aiohttp.ClientTimeout(total=30),
-)
-
 bot = Bot(
     Config.TOKEN,
-    session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 
@@ -2321,16 +2309,18 @@ async def check_all_shipped_orders():
 
 # ========== ENTRYPOINT ==========
 async def main():
-    logger.info("Бот запущен")
-    logger.info("BOT VERSION MARK: 2025-12-16 TEST — polling без webhook")
+    logger.info("Бот запущен — режим polling с автоматическим переподключением")
+    logger.info("BOT VERSION MARK: 2025-12-16 FINAL — stable polling")
     asyncio.create_task(check_all_shipped_orders())
-    if USE_WEBHOOK:
-        pass
-    else:
+
+    while True:
         try:
+            logger.info("Запуск polling с Telegram...")
             await dp.start_polling(bot)
-        finally:
-            await session.close()
+        except Exception as e:
+            logger.error(f"Polling упал: {type(e).__name__}: {e}")
+            logger.info("Жду 15 секунд перед повторным подключением...")
+            await asyncio.sleep(15)
 
 
 if __name__ == "__main__":
