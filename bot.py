@@ -2322,6 +2322,7 @@ async def check_all_shipped_orders():
 # ========== ENTRYPOINT ==========
 async def main():
     logger.info("Бот запущен")
+    logger.info("BOT VERSION MARK: 2025-12-16 TEST — polling без webhook")
     asyncio.create_task(check_all_shipped_orders())
     if USE_WEBHOOK:
         pass
