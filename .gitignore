@@ -1,39 +1,24 @@
-# ===== Python caches =====
-__pycache__/
-*.py[cod]
-*$py.class
-
-# ===== Virtual environments =====
+# venv
 .venv/
 venv/
-env/
-ENV/
 
-# ===== Environment / secrets =====
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# env secrets
 .env
-.env.*
 
-# ===== Logs =====
+# sqlite
+*.sqlite3
+*.db
+
+# logs
 *.log
 
-# ===== Local databases =====
-*.db
-*.sqlite3
-
-# ===== Build / packaging =====
-build/
-dist/
-*.egg-info/
-
-# ===== IDE / OS junk =====
+# ide
 .idea/
-.vscode/
+
+# misc
 .DS_Store
-Thumbs.db
-
-# ===== Temporary/editor files =====
-*.swp
-*.swo
-*.bak
-*~
-
