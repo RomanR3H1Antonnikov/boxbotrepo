@@ -1,4 +1,4 @@
-# virtual env
+# venv
 .venv/
 venv/
 
@@ -10,15 +10,16 @@ __pycache__/
 # env secrets
 .env
 
-# databases
-*.db
+# sqlite/db
 *.sqlite3
+*.db
 
 # logs
 *.log
 
 # ide
 .idea/
+.vscode/
 
 # system
 .DS_Store
