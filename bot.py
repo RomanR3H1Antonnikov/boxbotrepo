@@ -141,7 +141,7 @@ async def calculate_cdek_delivery_cost(pvz_code: str) -> Optional[dict]:
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=15)
+        r = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=15)
         if r.status_code == 200:
             data = r.json()
             cost = int(data.get("delivery_sum", 0))
@@ -170,7 +170,7 @@ async def get_cdek_order_status(cdek_uuid: str) -> Optional[str]:
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
-        r = requests.get(url, headers=headers, timeout=15)
+        r = await asyncio.to_thread(requests.get, url, headers=headers, timeout=15)
         if r.status_code == 200:
             status_code = r.json().get("status", {}).get("code")
             # переводим самые важные статусы
@@ -197,7 +197,7 @@ async def get_cdek_order_info(cdek_uuid: str) -> Optional[dict]:
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
-        r = requests.get(url, headers=headers, timeout=15)
+        r = await asyncio.to_thread(requests.get, url, headers=headers, timeout=15)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
@@ -405,9 +405,6 @@ dp = Dispatcher()
 r = Router()
 dp.include_router(r)
 
-def ustate(uid: int) -> UserState:
-    return state.get_user(uid)
-
 CODE_RE = re.compile(r"^\d{4}$")
 
 
@@ -485,7 +482,7 @@ async def create_cdek_order(order: Order) -> bool:
     url = "https://api.edu.cdek.ru/v2/orders"
 
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=30)
+        r = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=30)
         logger.info(f"СДЭК ответил: {r.status_code}\n{r.text[:2000]}")
 
         # 200 / 201 — обычный успех (прод), 202 — асинхронный успех на edu.cdek.ru
@@ -1970,7 +1967,7 @@ async def get_cdek_pvz_list(address_query: str, city: str = "Москва", limi
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp = await asyncio.to_thread(requests.get, url, params=params, headers=headers, timeout=15)
         if resp.status_code == 200:
             points = resp.json()
             logger.info(f"Найдено {len(points)} ПВЗ по запросу '{address_query}' в городе '{city}'")
