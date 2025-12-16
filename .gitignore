@@ -1,3 +1,39 @@
-venv/
+# ===== Python caches =====
 __pycache__/
-actions-runner/
+*.py[cod]
+*$py.class
+
+# ===== Virtual environments =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Environment / secrets =====
+.env
+.env.*
+
+# ===== Logs =====
+*.log
+
+# ===== Local databases =====
+*.db
+*.sqlite3
+
+# ===== Build / packaging =====
+build/
+dist/
+*.egg-info/
+
+# ===== IDE / OS junk =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ===== Temporary/editor files =====
+*.swp
+*.swo
+*.bak
+*~
+
