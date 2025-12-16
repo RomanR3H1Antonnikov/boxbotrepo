@@ -2,7 +2,7 @@
 .venv/
 venv/
 
-# python
+# python cache
 __pycache__/
 *.pyc
 *.pyo
@@ -10,7 +10,7 @@ __pycache__/
 # env secrets
 .env
 
-# sqlite
+# sqlite/db
 *.sqlite3
 *.db
 
@@ -19,6 +19,7 @@ __pycache__/
 
 # ide
 .idea/
+.vscode/
 
-# misc
+# system
 .DS_Store
