@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from enum import Enum
 from datetime import datetime, timedelta
+from sqlalchemy.orm import Session
+from db.repo import make_engine, get_or_create_user
+from db.init_db import init_db, seed_data
 # from aiohttp import web
 # from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
@@ -246,6 +249,7 @@ class Config:
     VIDEO1_ID = os.getenv("GALLERY_VIDEO1_ID")
     VIDEO2_ID = os.getenv("GALLERY_VIDEO2_ID")
     VIDEO3_ID = os.getenv("GALLERY_VIDEO3_ID")
+    DB_PATH = os.getenv("DB_PATH", "app.sqlite3")
     PRACTICE_NOTES: dict[int, Optional[str]] = {}
     EXPERTS: dict[str, dict] = {
         "anna": {"name": "Анна Большакова", "video_note_id": os.getenv("EXPERT_ANNA_NOTE_ID")},
@@ -925,6 +929,10 @@ def format_order_admin(order: Order) -> str:
 # ========== START / MENU ==========
 @r.message(CommandStart())
 async def on_start(message: Message):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        get_or_create_user(sess, message.from_user.id, message.from_user.username)
+        sess.commit()
     await send_greeting_circle(message)
     await message.answer("Выбери действие:", reply_markup=kb_main())
 
@@ -2309,6 +2317,13 @@ async def main():
     logger.info("Бот запущен — режим polling с автоматическим переподключением")
     logger.info("BOT VERSION MARK: 2025-12-16 FINAL — stable polling")
     asyncio.create_task(check_all_shipped_orders())
+    engine = make_engine(Config.DB_PATH)
+    init_db(engine)
+
+    # Один раз засеять продукт и коды (можно закомментировать после первого запуска)
+    with Session(engine) as sess:
+        seed_data(sess, anxiety_codes=None)  # сюда потом список кодов
+        sess.commit()
 
     while True:
         try:
