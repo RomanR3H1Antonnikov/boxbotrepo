@@ -1,8 +1,14 @@
 import os
+import sys
+
+# Добавляем корень проекта в PYTHONPATH, чтобы импортировать db из любой директории
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+sys.path.append(PROJECT_ROOT)
+
 from sqlalchemy.orm import Session
-from db.repo import make_engine
-from db.init_db import init_db, seed_data
-from db.repo import bulk_insert_redeem_codes
+from db.repo import make_engine, ensure_product, bulk_insert_redeem_codes
+from db.init_db import init_db
 
 # Путь к БД (тот же, что в боте)
 DB_PATH = os.getenv("DB_PATH", "app.sqlite3")
@@ -17,17 +23,16 @@ ANXIETY_CODES = [
 
 if __name__ == "__main__":
     engine = make_engine(DB_PATH)
-    init_db(engine)  # на всякий случай создаст таблицы
+    init_db(engine)  # создаст таблицы, если их нет
 
     with Session(engine) as sess:
-        # Создаём/получаем продукт "anxiety"
-        from db.repo import ensure_product
+        # Создаём или получаем продукт "anxiety"
         anxiety = ensure_product(
             sess,
             code="anxiety",
             title="Коробочка «Отпусти тревогу»",
             description="Комплект для снижения тревожности",
-            price_kop=299000
+            price_kop=299000  # 2990.00 руб
         )
 
         # Заливаем коды
