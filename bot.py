@@ -1167,7 +1167,7 @@ async def cb_checkout_start(cb: CallbackQuery):
         reset_waiting_flags(st)
         st.awaiting_contact = True
         await cb.message.answer(
-            "Введите данные в 3 строки:\n1. Имя Фамилия\n2. +7XXXXXXXXXX\n3. email@example.com",
+            "Введите данные в 3 строки:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.MENU.value}]])
         )
     await cb.answer()
@@ -1179,7 +1179,7 @@ async def cb_change_contact(cb: CallbackQuery):
         reset_waiting_flags(st)
         st.awaiting_contact = True
         await cb.message.answer(
-            "Введите новые данные:\n1. Имя Фамилия\n2. +7XXXXXXXXXX\n3. email@example.com",
+            "Введите новые данные:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
         )
     else:
