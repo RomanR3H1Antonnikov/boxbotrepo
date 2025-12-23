@@ -232,6 +232,7 @@ class CallbackData(Enum):
     ADMIN_SET_READY = "admin:set_ready"
     ADMIN_SET_SHIPPED = "admin:set_shipped"
     ADMIN_SET_ARCHIVED = "admin:set_archived"
+    ADMIN_SET_TRACK = "admin:set_track"
 
 class OrderStatus(Enum):
     NEW = "new"
@@ -377,6 +378,10 @@ class UserState:
     awaiting_pvz_address: bool = False
     pvz_for_order_id: Optional[int] = None
     awaiting_manual_pvz: bool = False
+    awaiting_gift_message: bool = False
+    gift_message: Optional[str] = None
+    awaiting_manual_track: bool = False
+    temp_order_id_for_track: Optional[int] = None
 
     full_name: Optional[str] = None
     phone: Optional[str] = None
@@ -922,7 +927,7 @@ def kb_change_contact() -> InlineKeyboardMarkup:
 def kb_admin_panel() -> InlineKeyboardMarkup:
     return create_inline_keyboard([
         [{"text": "Заказы для сборки", "callback_data": CallbackData.ADMIN_ORDERS_PREPAID.value}],
-        [{"text": "Заказы с дооплатой", "callback_data": CallbackData.ADMIN_ORDERS_READY.value}],
+        [{"text": "Заказы, ожидающие дооплаты", "callback_data": CallbackData.ADMIN_ORDERS_READY.value}],
         [{"text": "Отправленные заказы", "callback_data": CallbackData.ADMIN_ORDERS_SHIPPED.value}],
         [{"text": "Архив заказов", "callback_data": CallbackData.ADMIN_ORDERS_ARCHIVED.value}],
         [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
@@ -941,6 +946,8 @@ def kb_admin_order_actions(order: Order) -> InlineKeyboardMarkup:
     buttons = []
     if order.status == OrderStatus.PREPAID.value:
         buttons.append([{"text": "Готов к отправке", "callback_data": f"{CallbackData.ADMIN_SET_READY.value}:{order.id}"}])
+    if order.status in [OrderStatus.READY.value, OrderStatus.PAID.value] and not order.track:
+        buttons.append([{"text": "Ввести трек вручную", "callback_data": f"{CallbackData.ADMIN_SET_TRACK.value}:{order.id}"}])
     elif order.status == OrderStatus.SHIPPED.value:
         buttons.append([{"text": "Архивировать", "callback_data": f"{CallbackData.ADMIN_SET_ARCHIVED.value}:{order.id}"}])
     buttons.append([{"text": "Назад", "callback_data": CallbackData.ADMIN_PANEL.value}])
@@ -959,6 +966,8 @@ def format_order_review(order: Order) -> str:
 def format_order_admin(order: Order) -> str:
     u = ustate(order.user_id)
     pvz_code = order.extra_data.get("pvz_code", "—")
+    gift = order.extra_data.get("gift_message")
+    gift_text = f"Послание в подарок:\n{gift}\n\n" if gift else ""
     return (
         f"Заказ #{order.id}\n"
         f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
@@ -966,7 +975,8 @@ def format_order_admin(order: Order) -> str:
         f"ПВЗ код: {pvz_code}\n"
         f"Адрес: {order.address or '—'}\n"
         f"Трек: {order.track or '—'}\n"
-        f"Тип оплаты: {order.payment_kind or '—'}"
+        f"Тип оплаты: {order.payment_kind or '—'}\n\n"
+        f"{gift_text}"
     )
 
 # ========== START / MENU ==========
@@ -1044,26 +1054,22 @@ async def cb_gallery(cb: CallbackQuery):
     st = ustate(cb.from_user.id)
     reset_waiting_flags(st)
 
-    # Если уже смотрел — просто показываем текст новым сообщением
     if st.gallery_viewed:
         await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=st.team_viewed))
         await cb.answer()
         return
 
-    # Первый раз — отправляем видео
     try:
         await cb.message.answer("Загружаю видео знакомства...")
         await cb.message.answer_document(document=Config.VIDEO1_ID, caption="Видео 1")
         await cb.message.answer_document(document=Config.VIDEO2_ID, caption="Видео 2")
-        await cb.message.answer_document(document=Config.VIDEO3_ID, caption="Видео 3 — Часть 1")
-        await cb.message.answer_document(document=Config.VIDEO4_ID, caption="Видео 4 — Часть 2")
-        await cb.message.answer_document(document=Config.VIDEO5_ID, caption="Видео 5 — Часть 3")
-        await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=st.team_viewed))
+        await cb.message.answer_document(document=Config.VIDEO3_ID, caption="Видео 3 - Часть 1")
+        await cb.message.answer_document(document=Config.VIDEO4_ID, caption="Видео 4 - Часть 2")
+        await cb.message.answer_document(document=Config.VIDEO5_ID, caption="Видео 5 - Часть 3")
     except Exception as e:
         logger.error(f"Failed to send gallery videos: {e}")
         await cb.message.answer("Ошибка при загрузке видео. Свяжитесь с администратором.")
 
-    # После видео — новое сообщение с описанием
     await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=st.team_viewed))
 
     st.gallery_viewed = True
@@ -1270,12 +1276,13 @@ async def cb_pay(cb: CallbackQuery):
             order.status = OrderStatus.PAID.value
             order.payment_kind = "full"
 
+            order.status = OrderStatus.READY.value
             await notify_admins_payment_success(order)
 
             await cb.message.answer(
                 "Полная оплата получена! Спасибо огромное! ❤️\n\n"
                 f"Заказ <b>#{order.id}</b> уже собирается и скоро будет передан в СДЭК.\n"
-                "Трек-номер пришлю автоматически через 1–2 минуты",
+                "Трек-номер пришлю автоматически через 1–2 минуты(либо нажмите кнопку Обновить статус)",
                 reply_markup=kb_order_status(order)
             )
 
@@ -1288,7 +1295,7 @@ async def cb_pay(cb: CallbackQuery):
                 order.status = OrderStatus.READY.value
                 await cb.message.answer(
                     "Оплата прошла, но временная задержка с СДЭК\n"
-                    "Админ уже в курсе — отправим в ближайшие минуты!",
+                    "Админ уже в курсе - отправим в ближайшие минуты!",
                     reply_markup=kb_order_status(order)
                 )
 
@@ -1304,7 +1311,7 @@ async def cb_pay(cb: CallbackQuery):
             await cb.message.answer(
                 "Предоплата получена! Спасибо огромное! ❤️\n\n"
                 f"Заказ <b>#{order.id}</b> принят на сборку.\n"
-                "Как только коробочка будет готова — пришлю ссылку на дооплату остатка и сразу отправлю посылку",
+                "Как только коробочка будет готова - пришлю ссылку на дооплату остатка и сразу отправлю посылку",
                 reply_markup=kb_order_status(order)
             )
 
@@ -1471,7 +1478,7 @@ async def cb_admin_orders_ready(cb: CallbackQuery):
         logger.info("Admin access denied")
         await cb.answer("Доступ запрещён", show_alert=True)
         return
-    orders = [o for o in state.orders.values() if o.status in [OrderStatus.READY.value, OrderStatus.PAID.value]]
+    orders = [o for o in state.orders.values() if o.status == OrderStatus.READY.value]
     if not orders:
         await edit_or_send(cb.message, "Нет заказов с дооплатой или готовых к отправке.", kb_admin_panel())
     else:
@@ -1572,6 +1579,32 @@ async def cb_admin_set_archived(cb: CallbackQuery):
         await notify_admin(f"❌ Ошибка архивирования заказа #{oid if 'oid' in locals() else 'неизвестный'}")
         await cb.answer("Ошибка", show_alert=True)
 
+    @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_TRACK.value))
+    async def cb_admin_set_track(cb: CallbackQuery):
+        if not await is_admin(cb):
+            await cb.answer("Доступ запрещён", show_alert=True)
+            return
+        try:
+            oid = int(cb.data.split(":")[1])
+            order = state.orders.get(oid)
+            if not order:
+                await cb.answer("Заказ не найден")
+                return
+            # Сохраняем, что админ ждёт трек для этого заказа
+            st = ustate(cb.from_user.id)
+            st.awaiting_manual_track = True
+            st.temp_order_id_for_track = oid
+            await cb.message.answer(
+                f"Введите трек-номер для заказа #{oid}:",
+                reply_markup=create_inline_keyboard(
+                    [[{"text": "Отмена", "callback_data": CallbackData.ADMIN_PANEL.value}]])
+            )
+            await cb.answer()
+        except Exception as e:
+            logger.error(f"Set track error: {e}")
+            await cb.answer("Ошибка")
+
+
 # ========== TEXT HANDLERS ==========
 async def handle_contact(message: Message, ust: UserState, text: str):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
@@ -1607,7 +1640,7 @@ async def handle_pvz_address(message: Message, ust: UserState, text: str):
 
     if not pvz_list:
         await message.answer(
-            f"Не нашёл ПВЗ в <b>{city_name}</b>.\nПопробуй ввести адрес точнее или другой город.",
+            f"Не нашёл ПВЗ по такому адресу.\nПопробуй ввести адрес точнее или другой город.",
             parse_mode="HTML",
             reply_markup=create_inline_keyboard([
                 [{"text": "Попробовать ещё раз", "callback_data": "pvz_reenter"}],
@@ -1788,9 +1821,36 @@ async def cb_pvz_select(cb: CallbackQuery):
         )
         await cb.answer("Готово!")
 
+        st.awaiting_gift_message = True
+        await cb.message.answer(
+            "Хотите добавить личное послание в подарок получателю?\n(Текст будет вложен в коробочку)",
+            reply_markup=create_inline_keyboard([
+                [{"text": "Да, добавить", "callback_data": "gift:yes"}],
+                [{"text": "Нет, без послания", "callback_data": "gift:no"}],
+                [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
+            ])
+        )
+
     except Exception as e:
         logger.error(f"cb_pvz_select error: {e}", exc_info=True)
         await cb.answer("Ошибка", show_alert=True)
+
+
+@r.callback_query(F.data.startswith("gift:"))
+async def cb_gift_message(cb: CallbackQuery):
+    st = ustate(cb.from_user.id)
+    if cb.data == "gift:yes":
+        st.awaiting_gift_message = True
+        st.gift_message = None
+        await cb.message.answer(
+            "Напишите текст послания (до 300 символов):",
+            reply_markup=create_inline_keyboard([[{"text": "Отмена", "callback_data": "gift:cancel"}]])
+        )
+    else:
+        st.awaiting_gift_message = False
+        order = list(state.orders.values())[-1]
+        await show_review(cb.message, order)
+    await cb.answer()
 
 
 @r.callback_query(F.data == "pvz_manual")
@@ -1926,6 +1986,57 @@ async def on_text(message: Message):
     if st.awaiting_manual_pvz: await handle_manual_pvz(message, st, text); return
     if st.awaiting_pvz_address: await handle_pvz_address(message, st, text); return
 
+    if st.awaiting_pvz_address: await handle_pvz_address(message, st, text); return
+
+    # ←←← ОБРАБОТКА ПОДАРОЧНОГО ПОСЛАНИЯ ←←←
+    if st.awaiting_gift_message:
+        text = text.strip()
+        if len(text) > 300:
+            await message.answer("Слишком длинное послание (максимум 300 символов). Попробуйте короче.")
+            return
+        if len(text) == 0:
+            await message.answer("Послание пустое — отменяем добавление.")
+            st.awaiting_gift_message = False
+            # Показываем обзор последнего заказа пользователя
+            user_orders = [o for o in state.orders.values() if o.user_id == uid]
+            if user_orders:
+                order = user_orders[-1]
+                await show_review(message, order)
+            return
+
+        st.gift_message = text
+        st.awaiting_gift_message = False
+
+        # Сохраняем в последний заказ пользователя
+        user_orders = [o for o in state.orders.values() if o.user_id == uid]
+        if user_orders:
+            order = user_orders[-1]
+            order.extra_data["gift_message"] = text
+            await message.answer(
+                f"Послание добавлено:\n\n<i>{text}</i>\n\nТеперь финальный обзор заказа:",
+                parse_mode="HTML"
+            )
+            await show_review(message, order)
+        return
+
+    if st.awaiting_manual_track:
+        track = text.strip()
+        if not track:
+            await message.answer("Трек пустой — отменяем.")
+            st.awaiting_manual_track = False
+            return
+        oid = st.temp_order_id_for_track
+        st.awaiting_manual_track = False
+        st.temp_order_id_for_track = None
+        order = state.orders.get(oid)
+        if order:
+            order.track = track
+            order.status = OrderStatus.SHIPPED.value
+            await notify_admins_order_shipped(order)
+            await bot.send_message(order.user_id, f"Ваш заказ #{oid} отправлен! Трек-номер: {track}")
+            await message.answer(f"Трек {track} сохранён для заказа #{oid}")
+        return
+    
     await message.answer("Не понял запрос. Воспользуйтесь меню.", reply_markup=kb_main())
 
 
@@ -2373,8 +2484,8 @@ async def check_all_shipped_orders():
 
 # ========== ENTRYPOINT ==========
 async def main():
-    logger.info("Бот запущен — режим polling с автоматическим переподключением")
-    logger.info("BOT VERSION MARK: 2025-12-16 FINAL — stable polling")
+    logger.info("Бот запущен - режим polling с автоматическим переподключением")
+    logger.info("BOT VERSION MARK: 2025-12-23 FINAL")
     asyncio.create_task(check_all_shipped_orders())
     engine = make_engine(Config.DB_PATH)
     init_db(engine)
