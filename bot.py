@@ -833,10 +833,10 @@ def kb_gallery(team_shown: bool = False) -> InlineKeyboardMarkup:
     buttons = [
         [{"text": "Хочу заказать", "callback_data": CallbackData.CHECKOUT_START.value}],
         [{"text": "FAQ", "callback_data": CallbackData.FAQ.value}],
+        [{"text": "Назад", "callback_data": CallbackData.MENU.value}],
     ]
     if not team_shown:
-        buttons.insert(0, [{"text": "Команда коробочки", "callback_data": CallbackData.TEAM.value}])
-    buttons.append([{"text": "Назад", "callback_data": CallbackData.MENU.value}])
+        buttons.insert(1, [{"text": "Команда коробочки", "callback_data": CallbackData.TEAM.value}])
     return create_inline_keyboard(buttons)
 
 def kb_shipping() -> InlineKeyboardMarkup:
@@ -1044,26 +1044,28 @@ async def cb_gallery(cb: CallbackQuery):
     st = ustate(cb.from_user.id)
     reset_waiting_flags(st)
 
+    # Если уже смотрел — просто показываем текст новым сообщением
     if st.gallery_viewed:
-        await edit_or_send(cb.message, Config.GALLERY_TEXT, kb_gallery(team_shown=True))
+        await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=st.team_viewed))
         await cb.answer()
         return
 
-    await edit_or_send(cb.message, Config.GALLERY_TEXT, create_inline_keyboard([[{"text": "Загружаю видео...", "callback_data": "noop"}]]))
-
+    # Первый раз — отправляем видео
     try:
+        await cb.message.answer("Загружаю видео знакомства...")
         await cb.message.answer_video(video=Config.VIDEO1_ID, caption="Видео 1")
         await cb.message.answer_video(video=Config.VIDEO2_ID, caption="Видео 2")
-        await cb.message.answer_video(video=Config.VIDEO3_ID, caption="Видео 3 - Часть 1")
-        await cb.message.answer_video(video=Config.VIDEO4_ID, caption="Видео 3 - Часть 2")
-        await cb.message.answer_video(video=Config.VIDEO5_ID, caption="Видео 3 - Часть 3")
+        await cb.message.answer_video(video=Config.VIDEO3_ID, caption="Видео 3 — Часть 1")
+        await cb.message.answer_video(video=Config.VIDEO4_ID, caption="Видео 3 — Часть 2")
+        await cb.message.answer_video(video=Config.VIDEO5_ID, caption="Видео 3 — Часть 3")
     except Exception as e:
         logger.error(f"Failed to send gallery videos: {e}")
         await cb.message.answer("Ошибка при загрузке видео. Свяжитесь с администратором.")
 
-    st.gallery_viewed = True
+    # После видео — новое сообщение с описанием
+    await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=st.team_viewed))
 
-    await edit_or_send(cb.message, Config.GALLERY_TEXT, kb_gallery(team_shown=False))
+    st.gallery_viewed = True
     await cb.answer()
 
 @r.callback_query(F.data == CallbackData.FAQ.value)
@@ -1086,8 +1088,10 @@ async def cb_team(cb: CallbackQuery):
     st = ustate(cb.from_user.id)
 
     if st.team_viewed:
-        await cb.answer("Команду уже показывали - вот она!", show_alert=True)
+        await cb.answer("Команду уже показывали 🙂", show_alert=True)
         return
+
+    await cb.message.answer("Знакомься с командой коробочки!")
 
     experts_order = ["anna", "maria", "alena", "alexey", "alexander"]
     for key in experts_order:
@@ -1100,11 +1104,12 @@ async def cb_team(cb: CallbackQuery):
             except Exception as e:
                 logger.error(f"Team video error ({key}): {e}")
                 await cb.message.answer("Ошибка загрузки видео")
-        await cb.message.answer(f"<b>{name}</b>", parse_mode="ParseMode.HTML")
+        await cb.message.answer(f"<b>{name}</b>", parse_mode=ParseMode.HTML)
         await asyncio.sleep(0.6)
 
     st.team_viewed = True
-    await edit_or_send(cb.message, "Знакомься, команда коробочки!", kb_gallery(team_shown=True))
+
+    await cb.message.answer("Теперь ты знаешь команду, приятно познакомиться!))", reply_markup=kb_gallery(team_shown=True))
     await cb.answer()
 
 # ========== PRACTICES ==========
