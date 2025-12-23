@@ -370,6 +370,8 @@ class Order:
 
 @dataclass
 class UserState:
+    gallery_viewed: bool = False
+    team_viewed: bool = False
     awaiting_code: bool = False
     awaiting_contact: bool = False
     awaiting_pvz_address: bool = False
@@ -827,13 +829,15 @@ def kb_cabinet_unauth() -> InlineKeyboardMarkup:
         [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
     ])
 
-def kb_gallery() -> InlineKeyboardMarkup:
-    return create_inline_keyboard([
-        [{"text": "Команда коробочки", "callback_data": CallbackData.TEAM.value}],
+def kb_gallery(team_shown: bool = False) -> InlineKeyboardMarkup:
+    buttons = [
         [{"text": "Хочу заказать", "callback_data": CallbackData.CHECKOUT_START.value}],
         [{"text": "FAQ", "callback_data": CallbackData.FAQ.value}],
-        [{"text": "Назад", "callback_data": CallbackData.MENU.value}],
-    ])
+    ]
+    if not team_shown:
+        buttons.insert(0, [{"text": "Команда коробочки", "callback_data": CallbackData.TEAM.value}])
+    buttons.append([{"text": "Назад", "callback_data": CallbackData.MENU.value}])
+    return create_inline_keyboard(buttons)
 
 def kb_shipping() -> InlineKeyboardMarkup:
     return create_inline_keyboard([
@@ -1037,33 +1041,29 @@ async def cb_auth_start(cb: CallbackQuery):
 # ========== GALLERY + FAQ + TEAM ==========
 @r.callback_query(F.data == CallbackData.GALLERY.value)
 async def cb_gallery(cb: CallbackQuery):
-    reset_waiting_flags(ustate(cb.from_user.id))
+    st = ustate(cb.from_user.id)
+    reset_waiting_flags(st)
+
+    if st.gallery_viewed:
+        await edit_or_send(cb.message, Config.GALLERY_TEXT, kb_gallery(team_shown=True))
+        await cb.answer()
+        return
+
+    await edit_or_send(cb.message, Config.GALLERY_TEXT, create_inline_keyboard([[{"text": "Загружаю видео...", "callback_data": "noop"}]]))
+
     try:
-        await cb.message.answer_video(
-            video=Config.VIDEO1_ID,
-            caption=""
-        )
-        await cb.message.answer_video(
-            video=Config.VIDEO2_ID,
-            caption=""
-        )
-        await cb.message.answer_video(
-            video=Config.VIDEO3_ID,
-            caption=""
-        )
-        await cb.message.answer_video(
-            video=Config.VIDEO4_ID,
-            caption=""
-        )
-        await cb.message.answer_video(
-            video=Config.VIDEO5_ID,
-            caption=""
-        )
+        await cb.message.answer_video(video=Config.VIDEO1_ID, caption="Видео 1")
+        await cb.message.answer_video(video=Config.VIDEO2_ID, caption="Видео 2")
+        await cb.message.answer_video(video=Config.VIDEO3_ID, caption="Видео 3 - Часть 1")
+        await cb.message.answer_video(video=Config.VIDEO4_ID, caption="Видео 3 - Часть 2")
+        await cb.message.answer_video(video=Config.VIDEO5_ID, caption="Видео 3 - Часть 3")
     except Exception as e:
         logger.error(f"Failed to send gallery videos: {e}")
         await cb.message.answer("Ошибка при загрузке видео. Свяжитесь с администратором.")
 
-    await edit_or_send(cb.message, Config.GALLERY_TEXT, kb_gallery())
+    st.gallery_viewed = True
+
+    await edit_or_send(cb.message, Config.GALLERY_TEXT, kb_gallery(team_shown=False))
     await cb.answer()
 
 @r.callback_query(F.data == CallbackData.FAQ.value)
@@ -1083,6 +1083,12 @@ async def cb_faq_answer(cb: CallbackQuery):
 
 @r.callback_query(F.data == CallbackData.TEAM.value)
 async def cb_team(cb: CallbackQuery):
+    st = ustate(cb.from_user.id)
+
+    if st.team_viewed:
+        await cb.answer("Команду уже показывали - вот она!", show_alert=True)
+        return
+
     experts_order = ["anna", "maria", "alena", "alexey", "alexander"]
     for key in experts_order:
         info = Config.EXPERTS[key]
@@ -1094,11 +1100,11 @@ async def cb_team(cb: CallbackQuery):
             except Exception as e:
                 logger.error(f"Team video error ({key}): {e}")
                 await cb.message.answer("Ошибка загрузки видео")
-        else:
-            await cb.message.answer("Видео отсутствует")
-        await cb.message.answer(f"<b>{name}</b>", parse_mode=ParseMode.HTML)
+        await cb.message.answer(f"<b>{name}</b>", parse_mode="ParseMode.HTML")
         await asyncio.sleep(0.6)
-    await cb.message.answer("Знакомься, команда коробочки!", reply_markup=kb_gallery())
+
+    st.team_viewed = True
+    await edit_or_send(cb.message, "Знакомься, команда коробочки!", kb_gallery(team_shown=True))
     await cb.answer()
 
 # ========== PRACTICES ==========
