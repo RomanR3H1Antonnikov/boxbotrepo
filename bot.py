@@ -1053,11 +1053,12 @@ async def cb_gallery(cb: CallbackQuery):
     # Первый раз — отправляем видео
     try:
         await cb.message.answer("Загружаю видео знакомства...")
-        await cb.message.answer_video(video=Config.VIDEO1_ID, caption="Видео 1")
-        await cb.message.answer_video(video=Config.VIDEO2_ID, caption="Видео 2")
-        await cb.message.answer_video(video=Config.VIDEO3_ID, caption="Видео 3 — Часть 1")
-        await cb.message.answer_video(video=Config.VIDEO4_ID, caption="Видео 3 — Часть 2")
-        await cb.message.answer_video(video=Config.VIDEO5_ID, caption="Видео 3 — Часть 3")
+        await cb.message.answer_document(document=Config.VIDEO1_ID, caption="Видео 1")
+        await cb.message.answer_document(document=Config.VIDEO2_ID, caption="Видео 2")
+        await cb.message.answer_document(document=Config.VIDEO3_ID, caption="Видео 3 — Часть 1")
+        await cb.message.answer_document(document=Config.VIDEO4_ID, caption="Видео 4 — Часть 2")
+        await cb.message.answer_document(document=Config.VIDEO5_ID, caption="Видео 5 — Часть 3")
+        await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=st.team_viewed))
     except Exception as e:
         logger.error(f"Failed to send gallery videos: {e}")
         await cb.message.answer("Ошибка при загрузке видео. Свяжитесь с администратором.")
@@ -1088,7 +1089,7 @@ async def cb_team(cb: CallbackQuery):
     st = ustate(cb.from_user.id)
 
     if st.team_viewed:
-        await cb.answer("Команду уже показывали 🙂", show_alert=True)
+        await cb.answer("Команду уже показывали - смотри видеосообщения выше!", show_alert=True)
         return
 
     await cb.message.answer("Знакомься с командой коробочки!")
@@ -1591,8 +1592,8 @@ async def handle_pvz_address(message: Message, ust: UserState, text: str):
         return
 
     # Определяем город по тексту
-    city_name = "Москва"
-    city_code = "44"
+    city_name = None
+    city_code = None
 
     lower = query.lower()
     for name, code in Config.POPULAR_CITIES.items():
@@ -1601,8 +1602,7 @@ async def handle_pvz_address(message: Message, ust: UserState, text: str):
             city_code = code
             break
 
-    await message.answer(f"Ищу ПВЗ в городе <b>{city_name}</b>…", parse_mode="HTML")
-
+    await message.answer("Ищу ПВЗ по всей России…")
     pvz_list = await find_best_pvz(query, city=city_name, limit=20)
 
     if not pvz_list:
@@ -2016,8 +2016,7 @@ async def handle_admin_command(message: Message, text: str):
 
 # ========== НОВЫЕ ФУНКЦИИ СДЭК ==========
 
-async def get_cdek_pvz_list(address_query: str, city: str = "Москва", limit: int = 10) -> List[dict]:
-    """Ищет ПВЗ СДЭК по адресу + обязательно город (в тестовой среде без города — 0 результатов)"""
+async def get_cdek_pvz_list(address_query: str, city: str = None, limit: int = 10) -> List[dict]:
     token = await get_cdek_token()
     if not token:
         logger.error("Нет токена для поиска ПВЗ")
@@ -2025,18 +2024,20 @@ async def get_cdek_pvz_list(address_query: str, city: str = "Москва", limi
 
     url = "https://api.edu.cdek.ru/v2/deliverypoints"
     params = {
-        "city": city,
         "address": address_query.strip(),
         "type": "PVZ",
         "limit": limit
     }
+    if city:
+        params["city"] = city
+
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
         resp = await asyncio.to_thread(requests.get, url, params=params, headers=headers, timeout=15)
         if resp.status_code == 200:
             points = resp.json()
-            logger.info(f"Найдено {len(points)} ПВЗ по запросу '{address_query}' в городе '{city}'")
+            logger.info(f"Найдено {len(points)} ПВЗ по запросу '{address_query}'")
             return points
         else:
             logger.warning(f"Ошибка поиска ПВЗ: {resp.status_code} {resp.text}")
@@ -2184,7 +2185,7 @@ def filter_pvz_by_distance(pvz_list: List[dict], max_distance_m: int = 6000) -> 
             filtered.append(pvz)
     return filtered
 
-async def find_best_pvz(address_query: str, city: str = "Москва", limit: int = 10) -> List[dict]:
+async def find_best_pvz(address_query: str, city: str = None, limit: int = 10) -> List[dict]:
     variants = _normalize_address_variants(address_query)
     logger.info(f"Варианты адреса для поиска ПВЗ: {variants}")
 
