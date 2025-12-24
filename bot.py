@@ -1931,6 +1931,50 @@ async def cb_pvz_confirm(cb: CallbackQuery):
     await cb.answer("Готово!")
 
 
+@r.message()  # Это ловит ВСЕ текстовые сообщения
+async def handle_auth_input(message: Message):
+    # Проверяем, ожидает ли пользователь ввода данных (по наличию записи в БД)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, message.from_user.id)
+        if not user:
+            return
+
+        # Если пользователь ещё не авторизован — пытаемся обработать ввод
+        if not user.is_authorized:
+            text = message.text.strip()
+            lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+            if len(lines) == 3:
+                full_name, phone, email = lines
+                ok, msg = validate_data(full_name, phone, email)
+                if ok:
+                    user.full_name = full_name
+                    user.phone = phone
+                    user.email = email
+                    user.is_authorized = True
+                    sess.commit()
+
+                    await message.answer(
+                        f"Спасибо, {full_name.split()[0]}! Данные сохранены.\n"
+                        "Теперь вы авторизованы.",
+                        reply_markup=kb_main()
+                    )
+                    return
+                else:
+                    await message.answer(f"Ошибка: {msg}\nПопробуйте ещё раз.", reply_markup=kb_main())
+                    return
+            else:
+                # Если не 3 строки — просто напомним формат
+                await message.answer(
+                    "Введите данные в 3 строки:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com"
+                )
+                return
+
+    # Если не авторизация — передаём дальше в общий обработчик
+    await on_text(message)
+
+    
 @r.message()
 async def on_text(message: Message):
     text = (message.text or "").strip().lower()
