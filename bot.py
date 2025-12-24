@@ -1163,6 +1163,40 @@ async def cb_change_contact(cb: CallbackQuery):
     sess.commit()
     await cb.answer()
 
+
+# ========== UNIVERSAL BACK HANDLERS ==========
+@r.callback_query(F.data.in_({"gallery", "cabinet", "menu", "faq", "team"}))
+async def cb_back_navigation(cb: CallbackQuery):
+    data = cb.data
+
+    if data == "menu":
+        await edit_or_send(cb.message, "Выбери действие:", kb_main())
+    elif data == "gallery":
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            user = get_user_by_id(sess, cb.from_user.id)
+            if user and user.gallery_viewed:
+                await cb.message.answer(Config.GALLERY_TEXT,
+                                        reply_markup=kb_gallery(team_shown=user.team_viewed or False))
+            else:
+                # Если галерея ещё не показана — можно показать видео (как в cb_gallery)
+                # Или просто текст
+                await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=False))
+        await cb.answer()
+        return
+    elif data == "cabinet":
+        await cb_cabinet(cb)
+        return
+    elif data == "faq":
+        await cb_faq(cb)
+        return
+    elif data == "team":
+        await cb_team(cb)
+        return
+
+    await cb.answer()
+
+
 @r.callback_query(F.data == CallbackData.SHIP_CDEK.value)
 async def cb_shipping_cdek(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
@@ -1974,7 +2008,7 @@ async def handle_auth_input(message: Message):
     # Если не авторизация — передаём дальше в общий обработчик
     await on_text(message)
 
-    
+
 @r.message()
 async def on_text(message: Message):
     text = (message.text or "").strip().lower()
