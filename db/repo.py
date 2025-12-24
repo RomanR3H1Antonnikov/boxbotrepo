@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
-from sqlalchemy import create_engine, select, update
+from datetime import datetime, timezone
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from typing import List
 
-from .models import User, Product, Order, Payment, Access, RedeemCode
+from .models import User, Product, Order, Access, RedeemCode, RedeemUse
 
 
 def make_engine(db_path: str = "app.sqlite3"):
@@ -17,8 +18,8 @@ def get_or_create_user(session: Session, telegram_id: int, username: str | None 
         user = User(
             telegram_id=telegram_id,
             username=username,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
         )
         session.add(user)
         session.flush()  # чтобы получить ID если понадобится
@@ -27,7 +28,7 @@ def get_or_create_user(session: Session, telegram_id: int, username: str | None 
     else:
         if username and user.username != username:
             user.username = username
-        user.updated_at = datetime.utcnow()
+        user.updated_at = datetime.now(timezone.utc)
     return user
 
 
@@ -60,3 +61,36 @@ def bulk_insert_redeem_codes(session: Session, product_id: int, codes: list[str]
             session.add(RedeemCode(product_id=product_id, code=code))
             inserted += 1
     return inserted
+
+
+def update_user_state(session: Session, user: User):
+    session.merge(user)
+    session.commit()
+
+
+def get_user_by_id(session: Session, telegram_id: int) -> User | None:
+    return session.get(User, telegram_id)
+
+
+def create_order_db(session: Session, user_id: int, **kwargs) -> Order:
+    order = Order(user_id=user_id, **kwargs)
+    session.add(order)
+    session.commit()
+    return order
+
+
+def get_user_orders_db(session: Session, user_id: int) -> List[Order]:
+    return list(
+        session.scalars(
+            select(Order)
+            .where(Order.user_id == user_id)
+            .order_by(Order.id.desc())
+        ).all()
+    )
+
+
+def mark_code_used(session: Session, code: str, user_id: int):
+    exists = session.query(RedeemUse).filter_by(redeem_code_id=code).first()
+    if not exists:
+        session.add(RedeemUse(redeem_code_id=code, user_id=user_id))
+        session.commit()

@@ -1,6 +1,6 @@
 from __future__ import annotations
-
-from datetime import datetime
+from sqlalchemy import JSON
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger, Integer, String, Text, Boolean, DateTime,
@@ -19,13 +19,30 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     email: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    gallery_viewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    team_viewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    practices_access: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
 
     # Связи
     orders: Mapped[list["Order"]] = relationship(back_populates="user", lazy="selectin")
     access: Mapped["Access"] = relationship(back_populates="user", uselist=False, lazy="joined")
+
+    is_authorized: Mapped[bool] = mapped_column(Boolean, default=False)  # вместо проверки full_name/phone/email
+    practices: Mapped[list[str]] = mapped_column(JSON, default=list)  # для практик
+    temp_selected_pvz: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # временные данные
+    awaiting_gift_message: Mapped[bool] = mapped_column(Boolean, default=False)
+    pvz_for_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    awaiting_manual_pvz: Mapped[bool] = mapped_column(Boolean, default=False)
+    awaiting_manual_track: Mapped[bool] = mapped_column(Boolean, default=False)
+    temp_order_id_for_track: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Product(Base):
@@ -41,7 +58,9 @@ class Product(Base):
     has_practices: Mapped[bool] = mapped_column(Boolean, default=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
     # Связи
     orders: Mapped[list["Order"]] = relationship(back_populates="product")
@@ -67,14 +86,35 @@ class Order(Base):
     track: Mapped[str | None] = mapped_column(String(64), nullable=True)
     cdek_uuid: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
 
     # Связи
     user: Mapped["User"] = relationship(back_populates="orders")
     product: Mapped["Product"] = relationship(back_populates="orders")
     payments: Mapped[list["Payment"]] = relationship(back_populates="order", cascade="all, delete-orphan")
     redeem_use: Mapped["RedeemUse | None"] = relationship(back_populates="order", uselist=False)
+
+    extra_data: Mapped[dict] = mapped_column(JSON, default=dict)  # для pvz_code, delivery_period и т.д.
+    payment_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)  # "full", "pre", "remainder"
+
+    @property
+    def remainder_amount(self) -> int:
+        prepay = (self.total_price_kop * 30) // 100
+        return max(self.total_price_kop - prepay, 0) // 100  # в рублях
+
+    @property
+    def prepay_amount(self) -> int:
+        return (self.total_price_kop * 30 // 100) // 100  # в рублях
+
+    @property
+    def total_price(self) -> int:
+        return self.total_price_kop // 100  # в рублях
 
 
 class Payment(Base):
@@ -87,8 +127,13 @@ class Payment(Base):
     amount_kop: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
 
     order: Mapped["Order"] = relationship(back_populates="payments")
 
@@ -106,7 +151,10 @@ class Access(Base):
     channel_access: Mapped[bool] = mapped_column(Boolean, default=False)
     practices_access: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
 
     user: Mapped["User"] = relationship(back_populates="access")
 
@@ -138,6 +186,8 @@ class RedeemUse(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id"), nullable=False)
     order_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("orders.id"), nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
     order: Mapped["Order | None"] = relationship(back_populates="redeem_use")

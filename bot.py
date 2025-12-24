@@ -3,21 +3,17 @@ import re
 import asyncio
 import logging
 import requests
-import aiohttp
-import secrets
-import subprocess
-import socket
-from aiohttp import TCPConnector
-from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from enum import Enum
-from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from db.repo import make_engine, get_or_create_user
+from sqlalchemy import select
 from db.init_db import init_db, seed_data
-# from aiohttp import web
-# from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-
+from db.repo import (
+    make_engine, get_or_create_user,
+    get_user_by_id,
+    create_order_db, get_user_orders_db
+)
+from db.models import Order
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -33,34 +29,19 @@ from dotenv import load_dotenv
 # ========== CONFIG ==========
 USE_WEBHOOK = False
 load_dotenv()
-# WEBHOOK_PORT = 8000
-# WEBHOOK_PATH = "/webhook"
-# WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") or secrets.token_hex(32)
 
-# _TUNNEL_URL_RE = re.compile(r"(https://[a-z0-9-]+\.trycloudflare\.com)", re.I)
-
-# async def start_cloudflared_and_get_url(local_port: int) -> str:
-#     """
-#     Запускает cloudflared в режиме quick tunnel и возвращает публичный https URL.
-#     Важно: URL может меняться при рестарте — мы будем переустанавливать webhook на старте.
-#     """
-#     proc = await asyncio.create_subprocess_exec(
-#         "cloudflared", "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{local_port}",
-#         stdout=asyncio.subprocess.PIPE,
-#         stderr=asyncio.subprocess.STDOUT,
-#     )
-#
-#     assert proc.stdout is not None
-#     while True:
-#         line = await proc.stdout.readline()
-#         if not line:
-#             raise RuntimeError("cloudflared завершился до выдачи публичного URL")
-#         s = line.decode("utf-8", errors="ignore").strip()
-#         m = _TUNNEL_URL_RE.search(s)
-#         if m:
-#             return m.group(1)  # например https://xxxx.trycloudflare.com
+# ============DATABASE===========
+def get_order_by_id(order_id: int, user_id: int) -> Optional[Order]:
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        return sess.get(Order, order_id) if sess.get(Order, order_id) and sess.get(Order, order_id).user_id == user_id else None
 
 
+def get_all_orders_by_status(status: str) -> List[Order]:
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        stmt = select(Order).where(Order.status == status)
+        return sess.scalars(stmt).all()
 # ==============DATA=============
 STREET_KEYWORDS = [
     "ул", "ул.", "улица",
@@ -347,83 +328,6 @@ class Config:
         "Казань": "138",
     }
 
-# ========== DATA CLASSES ==========
-@dataclass
-class Order:
-    id: int
-    user_id: int
-    contact_raw: str = ""
-    shipping_method: str = "cdek_pvz"
-    address: str = ""
-    status: str = OrderStatus.NEW.value
-    track: Optional[str] = None
-    payment_kind: Optional[str] = None
-    extra_data: dict = field(default_factory=dict)
-    total_price: int = 0
-
-    @property
-    def prepay_amount(self) -> int:
-        return (Config.PRICE_RUB * Config.PREPAY_PERCENT + 99) // 100
-
-    @property
-    def remainder_amount(self) -> int:
-        return max(Config.PRICE_RUB - self.prepay_amount, 0)
-
-@dataclass
-class UserState:
-    gallery_viewed: bool = False
-    team_viewed: bool = False
-    awaiting_code: bool = False
-    awaiting_contact: bool = False
-    awaiting_pvz_address: bool = False
-    pvz_for_order_id: Optional[int] = None
-    awaiting_manual_pvz: bool = False
-    awaiting_gift_message: bool = False
-    gift_message: Optional[str] = None
-    awaiting_manual_track: bool = False
-    temp_order_id_for_track: Optional[int] = None
-
-    full_name: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    practices: List[str] = field(default_factory=list)
-    temp_address: Optional[str] = None
-    temp_pvz_list: List[dict] = field(default_factory=list)
-    selected_pvz_code: Optional[str] = None
-    temp_selected_pvz: Optional[dict] = None
-    extra_data: dict = field(default_factory=dict)
-
-    @property
-    def is_authorized(self) -> bool:
-        return bool(self.full_name and self.phone and self.email)
-
-class BotState:
-    def __init__(self):
-        self.total_price: int = 0
-        self.users: Dict[int, UserState] = {}
-        self.orders: Dict[int, Order] = {}
-        self.next_order_id: int = 1
-        self.used_codes: set[str] = set()
-        self.pending_tasks: Dict[int, asyncio.Task] = {}
-
-    def get_user(self, uid: int) -> UserState:
-        if uid not in self.users:
-            self.users[uid] = UserState()
-        return self.users[uid]
-
-    def new_order(self, uid: int) -> Order:
-        order = Order(id=self.next_order_id, user_id=uid)
-        self.orders[order.id] = order
-        self.next_order_id += 1
-        logger.info(f"NEW ORDER: #{order.id} | user {uid}")
-        return order
-
-
-state = BotState()
-def ustate(uid: int) -> UserState:
-    return state.get_user(uid)
-
-
 # ========== ADMIN ==========
 ADMIN_USERNAMES = {"@RE_HY"}
 ADMIN_ID = 1049170524
@@ -452,7 +356,12 @@ async def create_cdek_order(order: Order) -> bool:
         logger.error(f"Нет pvz_code для заказа #{order.id}")
         return False
 
-    u = ustate(order.user_id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        u = get_user_by_id(sess, order.user_id)
+        if not u or not u.full_name or not u.phone:
+            logger.error(f"Нет данных пользователя для заказа #{order.id}")
+            return False
 
     payload = {
         "type": 2,
@@ -476,7 +385,7 @@ async def create_cdek_order(order: Order) -> bool:
         },
 
         "recipient": {
-            "name": u.full_name or "Клиент",
+            "name": u.full_name,
             "phones": [{"number": u.phone.replace("+","").replace(" ","").replace("-","")}]
         },
 
@@ -558,8 +467,8 @@ async def create_cdek_order(order: Order) -> bool:
 def validate_data(full_name: str, phone: str, email: str) -> tuple[bool, str]:
     if not full_name or not full_name.strip():
         return False, "Отсутствует ФИО."
-    if not re.match(r"^[А-Я][а-я]+(\s+[А-Я][а-я]+)$", full_name.strip()):
-        return False, "ФИО: Имя и Фамилия с заглавной буквы, без отчества."
+    if not re.match(r"^[А-ЯЁ][а-яё]+(\s+[А-ЯЁ][а-яё]+)+$", full_name.strip()):
+        return False, "ФИО: Имя и Фамилия с заглавной буквы, без отчества и лишних пробелов."
     if not phone or not phone.strip():
         return False, "Отсутствует телефон."
     phone = phone.strip().replace(" ", "").replace("-", "")
@@ -607,7 +516,10 @@ async def notify_admin(text: str):
         logger.error(f"Admin notify failed: {e}")
 
 async def notify_admins_payment_started(order: Order):
-    u = ustate(order.user_id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        u = get_user_by_id(sess, order.user_id)
+        full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
         f"🔔 Новый заказ #{order.id}\n"
         f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
@@ -617,7 +529,10 @@ async def notify_admins_payment_started(order: Order):
     )
 
 async def notify_admins_payment_success(order: Order):
-    u = ustate(order.user_id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        u = get_user_by_id(sess, order.user_id)
+        full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
         f"✅ Предоплата #{order.id} получена\n"
         f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
@@ -625,7 +540,10 @@ async def notify_admins_payment_success(order: Order):
     )
 
 async def notify_admins_order_ready(order: Order):
-    u = ustate(order.user_id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        u = get_user_by_id(sess, order.user_id)
+        full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
         f"📦 Заказ #{order.id} собран\n"
         f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
@@ -633,7 +551,10 @@ async def notify_admins_order_ready(order: Order):
     )
 
 async def notify_admins_payment_remainder(order: Order):
-    u = ustate(order.user_id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        u = get_user_by_id(sess, order.user_id)
+        full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
         f"💸 Заказ #{order.id} полностью оплачен\n"
         f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
@@ -641,7 +562,10 @@ async def notify_admins_payment_remainder(order: Order):
     )
 
 async def notify_admins_order_shipped(order: Order):
-    u = ustate(order.user_id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        u = get_user_by_id(sess, order.user_id)
+        full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
         f"🚚 Заказ #{order.id} отправлен\n"
         f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
@@ -650,7 +574,10 @@ async def notify_admins_order_shipped(order: Order):
     )
 
 async def notify_admins_order_archived(order: Order):
-    u = ustate(order.user_id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        u = get_user_by_id(sess, order.user_id)
+        full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
         f"🗄 Заказ #{order.id} заархивирован\n"
         f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
@@ -659,7 +586,10 @@ async def notify_admins_order_archived(order: Order):
 
 
 async def notify_admins_order_address_changed(order: Order):
-    u = ustate(order.user_id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        u = get_user_by_id(sess, order.user_id)
+        full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
         f"!! Обновлён адрес ПВЗ для заказа #{order.id}\n"
         f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
@@ -685,38 +615,6 @@ async def notify_client_order_abandoned(order: Order, message: Message):
         f"Ваш заказ #{order.id} был отменён из-за отсутствия оплаты в течение 10 минут.",
         reply_markup=kb_main()
     )
-
-async def schedule_payment_timeout(order_id: int, message: Message):
-    if order_id in state.pending_tasks:
-        try:
-            state.pending_tasks[order_id].cancel()
-        except Exception:
-            pass
-    async def _job():
-        try:
-            await asyncio.sleep(Config.PAYMENT_TIMEOUT_SEC)
-            order = state.orders.get(order_id)
-            if order and order.status == OrderStatus.PENDING.value:
-                order.status = OrderStatus.ABANDONED.value
-                await notify_admin(f"🕓 Заказ #{order_id} отменён (таймаут оплаты)")
-                await notify_client_order_abandoned(order, message)
-        except asyncio.CancelledError:
-            return
-    task = asyncio.create_task(_job())
-    state.pending_tasks[order_id] = task
-
-def cancel_payment_timeout(order_id: int):
-    t = state.pending_tasks.pop(order_id, None)
-    if t:
-        t.cancel()
-
-# ======== RESET UTILS ========
-def reset_waiting_flags(st: UserState):
-    st.awaiting_code = False
-    st.awaiting_contact = False
-    st.awaiting_pvz_address = False
-    st.awaiting_manual_pvz = False
-
 
 # ======== SEND UTILS ========
 async def edit_or_send(
@@ -773,16 +671,6 @@ async def send_practice_intro(message: Message, idx: int, title: str):
     details = Config.PRACTICE_DETAILS[idx]
     descr = f"<b>{title}</b>\n⏰ {details['duration']} мин\n\n{details['desc']}"
     await message.answer(descr)
-
-async def handle_code(message: Message, ust: UserState, text: str):
-    if CODE_RE.fullmatch(text) and text in Config.CODES_POOL and text not in state.used_codes:
-        state.used_codes.add(text)
-        ust.awaiting_code = False
-        ust.practices = Config.DEFAULT_PRACTICES.copy()
-        await message.answer("Готово! Доступ к практикам открыт")
-        await message.answer("Твои практики:", reply_markup=kb_practices_list(ust.practices))
-    else:
-        await message.answer("Код неверный или уже использован. Проверьте код.")
 
 # ========== KEYBOARDS ==========
 def create_inline_keyboard(buttons: List[List[dict]]) -> InlineKeyboardMarkup:
@@ -964,13 +852,16 @@ def format_order_review(order: Order) -> str:
     )
 
 def format_order_admin(order: Order) -> str:
-    u = ustate(order.user_id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        u = get_user_by_id(sess, order.user_id)
+        full_name = u.full_name if u else "Неизвестно"
     pvz_code = order.extra_data.get("pvz_code", "—")
     gift = order.extra_data.get("gift_message")
     gift_text = f"Послание в подарок:\n{gift}\n\n" if gift else ""
     return (
         f"Заказ #{order.id}\n"
-        f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
+        f"Пользователь: {full_name} ({order.user_id})\n"
         f"Статус: {order.status}\n"
         f"ПВЗ код: {pvz_code}\n"
         f"Адрес: {order.address or '—'}\n"
@@ -999,9 +890,12 @@ async def grab_id(message: Message):
 
 @r.message(Command("menu"))
 async def cmd_menu(message: Message):
-    st = ustate(message.from_user.id)
-    reset_waiting_flags(st)
-    st.pvz_for_order_id = None
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, message.from_user.id)
+        if user:
+            user.pvz_for_order_id = None
+            sess.commit()
     await message.answer("Выбери действие:", reply_markup=kb_main())
 
 @r.message(Command("admin_panel"))
@@ -1013,25 +907,30 @@ async def cmd_admin_panel(message: Message):
 @r.callback_query(F.data == CallbackData.MENU.value)
 async def cb_menu(cb: CallbackQuery):
     logger.info(f"Menu callback: user_id={cb.from_user.id}, data={cb.data}")
-    reset_waiting_flags(ustate(cb.from_user.id))
+    # reset_waiting_flags(ustate(cb.from_user.id))
     await edit_or_send(cb.message, "Выбери действие:", kb_main())
     await cb.answer()
 
 # ========== CABINET ==========
 @r.callback_query(F.data == CallbackData.CABINET.value)
 async def cb_cabinet(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    reset_waiting_flags(st)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
     name = cb.from_user.first_name or "друг"
-    if not st.is_authorized:
+    if not user.is_authorized:
         await edit_or_send(cb.message, f"Добро пожаловать, {name}!\nВы не авторизованы.", kb_cabinet_unauth())
     else:
-        await edit_or_send(cb.message, f"Добро пожаловать, {name}!\nВы авторизованы как {st.full_name}.", kb_cabinet())
+        await edit_or_send(cb.message, f"Добро пожаловать, {name}!\nВы авторизованы как {user.full_name}.", kb_cabinet())
+    sess.commit()
     await cb.answer()
 
 @r.callback_query(F.data == CallbackData.HELP.value)
 async def cb_help(cb: CallbackQuery):
-    reset_waiting_flags(ustate(cb.from_user.id))
+    # reset_waiting_flags(ustate(cb.from_user.id))
     await edit_or_send(cb.message, f"При ошибке обращайтесь: {Config.ADMIN_HELP_NICK}",
                        create_inline_keyboard([[{"text": "В меню", "callback_data": CallbackData.MENU.value}]]))
     await cb.answer()
@@ -1039,23 +938,48 @@ async def cb_help(cb: CallbackQuery):
 # ========== AUTH ==========
 @r.callback_query(F.data == CallbackData.AUTH_START.value)
 async def cb_auth_start(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    reset_waiting_flags(st)
-    st.awaiting_contact = True
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+    # user.awaiting_contact = True
     await cb.message.answer(
         "Введите данные в 3 строки:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
         reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.CABINET.value}]])
     )
+    sess.commit()
     await cb.answer()
 
 # ========== GALLERY + FAQ + TEAM ==========
 @r.callback_query(F.data == CallbackData.GALLERY.value)
 async def cb_gallery(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    reset_waiting_flags(st)
+    engine = make_engine(Config.DB_PATH)
+    try:
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            user = get_user_by_id(sess, cb.from_user.id)
+            if not user:
+                await cb.answer("Ошибка доступа", show_alert=True)
+                return
 
-    if st.gallery_viewed:
-        await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=st.team_viewed))
+            if not user.is_authorized:
+                await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
+                await cb.answer()
+                return
+
+            orders = get_user_orders_db(sess, cb.from_user.id)
+            ids = [o.id for o in orders]
+
+            sess.commit()  # на всякий случай
+    except Exception as e:
+        logger.error(f"DB error in cb_orders_list: {e}")
+        await cb.answer("Временная ошибка сервера. Попробуйте позже.", show_alert=True)
+        return
+
+    if user.gallery_viewed:
+        await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=user.team_viewed))
         await cb.answer()
         return
 
@@ -1070,14 +994,15 @@ async def cb_gallery(cb: CallbackQuery):
         logger.error(f"Failed to send gallery videos: {e}")
         await cb.message.answer("Ошибка при загрузке видео. Свяжитесь с администратором.")
 
-    await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=st.team_viewed))
+    await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=user.team_viewed))
 
-    st.gallery_viewed = True
+    user.gallery_viewed = True
+    sess.commit()
     await cb.answer()
 
 @r.callback_query(F.data == CallbackData.FAQ.value)
 async def cb_faq(cb: CallbackQuery):
-    reset_waiting_flags(ustate(cb.from_user.id))
+    # reset_waiting_flags(ustate(cb.from_user.id))
     await edit_or_send(cb.message, "Частые вопросы:", kb_faq())
     await cb.answer()
 
@@ -1092,13 +1017,18 @@ async def cb_faq_answer(cb: CallbackQuery):
 
 @r.callback_query(F.data == CallbackData.TEAM.value)
 async def cb_team(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка")
+            return
 
-    if st.team_viewed:
-        await cb.answer("Команду уже показывали - смотри видеосообщения выше!", show_alert=True)
-        return
+        if user.team_viewed:
+            await cb.answer("Команду уже показывали - смотри видеосообщения выше!", show_alert=True)
+            return
 
-    await cb.message.answer("Знакомься с командой коробочки!")
+        await cb.message.answer("Знакомься с командой коробочки!")
 
     experts_order = ["anna", "maria", "alena", "alexey", "alexander"]
     for key in experts_order:
@@ -1114,40 +1044,52 @@ async def cb_team(cb: CallbackQuery):
         await cb.message.answer(f"<b>{name}</b>", parse_mode=ParseMode.HTML)
         await asyncio.sleep(0.6)
 
-    st.team_viewed = True
+    user.team_viewed = True
+    sess.commit()
 
-    await cb.message.answer("Теперь ты знаешь команду, приятно познакомиться!))", reply_markup=kb_gallery(team_shown=True))
+    await cb.message.answer("Теперь ты знаешь команду, приятно познакомиться!))",
+                            reply_markup=kb_gallery(team_shown=True))
     await cb.answer()
 
 # ========== PRACTICES ==========
 @r.callback_query(F.data == CallbackData.PRACTICES.value)
 async def cb_practices(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    reset_waiting_flags(st)
-    if not st.is_authorized:
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+    if not user.is_authorized:
         await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
         await cb.answer(); return
-    if not st.practices:
+    if not user.practices:
         await edit_or_send(cb.message, "У вас нет практик.\nАктивируйте код или закажите коробочку.", kb_empty_practices())
         await cb.answer(); return
-    await edit_or_send(cb.message, "Твои практики:", kb_practices_list(st.practices))
+    await edit_or_send(cb.message, "Твои практики:", kb_practices_list(user.practices))
+    sess.commit()
     await cb.answer()
 
 @r.callback_query(F.data.startswith("practice:"))
 async def cb_open_practice(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
     parts = cb.data.split(":")
     if len(parts) >= 3 and parts[1] == "play":
         await cb.answer(); return
     try:
         idx = int(parts[1])
     except:
-        await cb.message.answer("Ошибка.", reply_markup=kb_practices_list(st.practices))
+        await cb.message.answer("Ошибка.", reply_markup=kb_practices_list(user.practices))
         await cb.answer(); return
-    if not (st.is_authorized and 0 <= idx < len(st.practices)):
-        await cb.message.answer("Доступ ограничен.", reply_markup=kb_practices_list(st.practices))
+    if not (user.is_authorized and 0 <= idx < len(user.practices)):
+        await cb.message.answer("Доступ ограничен.", reply_markup=kb_practices_list(user.practices))
         await cb.answer(); return
-    title = st.practices[idx]
+    title = user.practices[idx]
     note_id = Config.PRACTICE_NOTES.get(idx)
     if note_id:
         try:
@@ -1156,72 +1098,89 @@ async def cb_open_practice(cb: CallbackQuery):
             logger.error(f"Practice video error: {e}")
     await send_practice_intro(cb.message, idx, title)
     await cb.message.answer(f"<b>Практика:</b> {title}\n\nНачинаем?", reply_markup=kb_practice_card(idx))
+    sess.commit()
     await cb.answer()
 
 # ========== REDEEM ==========
 @r.callback_query(F.data == CallbackData.REDEEM_START.value)
 async def cb_redeem_start(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    reset_waiting_flags(st)
-    if not st.is_authorized:
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+    if not user.is_authorized:
         await cb.message.answer("Сначала авторизуйтесь.", reply_markup=kb_cabinet_unauth())
         await cb.answer(); return
-    st.awaiting_code = True
+    # user.awaiting_code = True
     await cb.message.answer("Введите <b>код с карточки</b>:",
                             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.CABINET.value}]]))
+    sess.commit()
     await cb.answer()
 
 # ========== CHECKOUT ==========
 @r.callback_query(F.data == CallbackData.CHECKOUT_START.value)
 async def cb_checkout_start(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    st.pvz_for_order_id = None
-    if st.is_authorized:
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+    user.pvz_for_order_id = None
+    if user.is_authorized:
         await cb.message.answer(
-            f"Проверьте данные:\n• ФИО: {st.full_name}\n• Телефон: {st.phone}\n• Email: {st.email}\n\nХотите изменить?",
+            f"Проверьте данные:\n• ФИО: {user.full_name}\n• Телефон: {user.phone}\n• Email: {user.email}\n\nХотите изменить?",
             reply_markup=kb_change_contact()
         )
     else:
-        reset_waiting_flags(st)
-        st.awaiting_contact = True
         await cb.message.answer(
             "Введите данные в 3 строки:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.MENU.value}]])
         )
+    sess.commit()
     await cb.answer()
 
 @r.callback_query(F.data.startswith("change_contact:"))
 async def cb_change_contact(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
     if cb.data == CallbackData.CHANGE_CONTACT_YES.value:
-        reset_waiting_flags(st)
-        st.awaiting_contact = True
         await cb.message.answer(
             "Введите новые данные:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
         )
     else:
-        reset_waiting_flags(st)
-        st.awaiting_pvz_address = True
         await cb.message.answer(
             "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
         )
+    sess.commit()
     await cb.answer()
 
 @r.callback_query(F.data == CallbackData.SHIP_CDEK.value)
 async def cb_shipping_cdek(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    if not st.is_authorized:
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+    if not user.is_authorized:
         await cb.message.answer("Сначала авторизуйтесь.", reply_markup=kb_cabinet_unauth())
         await cb.answer(); return
-    reset_waiting_flags(st)
-    st.pvz_for_order_id = None
-    st.awaiting_pvz_address = True
+    user.pvz_for_order_id = None
+    # user.awaiting_pvz_address = True
     await cb.message.answer(
         "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
         reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
     )
+    sess.commit()
     await cb.answer()
 
 async def show_review(msg: Message, order: Order):
@@ -1235,28 +1194,48 @@ async def cb_pay(cb: CallbackQuery):
         kind = parts[1]           # "full" | "pre" | "rem"
         oid_str = parts[2]
         oid = int(oid_str) if oid_str != "0" else None
-        st = ustate(cb.from_user.id)
+        try:
+            engine = make_engine(Config.DB_PATH)
+            with Session(engine) as sess:
+                user = get_user_by_id(sess, cb.from_user.id)
+                if not user:
+                    await cb.answer("Ошибка доступа", show_alert=True)
+                    return
+
+                if not user.is_authorized:
+                    await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
+                    await cb.answer()
+                    return
+
+                orders = get_user_orders_db(sess, cb.from_user.id)
+                ids = [o.id for o in orders]
+
+                sess.commit()
+        except Exception as e:
+            logger.error(f"DB error in cb_orders_list: {e}")
+            await cb.answer("Временная ошибка сервера. Попробуйте позже.", show_alert=True)
+            return
 
         # === 1. Находим или создаём заказ ===
         if oid:
-            order = state.orders.get(oid)
+            order = get_order_by_id(oid, cb.from_user.id)
             if not order or order.user_id != cb.from_user.id:
                 await cb.answer("Заказ не найден", show_alert=True)
                 return
         else:
             # Новый заказ — только при первой оплате (100% или 30%)
-            if not st.temp_selected_pvz:
+            if not user.temp_selected_pvz:
                 await cb.answer("Ошибка: ПВЗ не выбран", show_alert=True)
                 return
-            order = state.new_order(cb.from_user.id)
+            order = user.new_order(cb.from_user.id)
             order.shipping_method = "cdek_pvz"
-            order.address = st.temp_selected_pvz["address"]
+            order.address = user.temp_selected_pvz["address"]
             order.extra_data.update({
-                "pvz_code": st.temp_selected_pvz["code"],
-                "delivery_cost": st.extra_data.get("delivery_cost", 590),
-                "delivery_period": st.extra_data.get("delivery_period", "3–7"),
+                "pvz_code": user.temp_selected_pvz["code"],
+                "delivery_cost": user.extra_data.get("delivery_cost", 590),
+                "delivery_period": user.extra_data.get("delivery_period", "3–7"),
             })
-            st.temp_selected_pvz = None
+            user.temp_selected_pvz = None
 
         # Устанавливаем итоговую цену (один раз)
         if order.total_price == 0:
@@ -1265,9 +1244,6 @@ async def cb_pay(cb: CallbackQuery):
 
         # Уведомляем админа о начале оплаты
         await notify_admins_payment_started(order)
-
-        # Отменяем таймаут оплаты
-        cancel_payment_timeout(order.id)
 
         # ==================================================================
         # === СЦЕНАРИЙ 1: Полная оплата сразу (100%) =========================
@@ -1363,9 +1339,14 @@ async def cb_pay(cb: CallbackQuery):
 # ========== ORDER STATUS ==========
 @r.callback_query(F.data.startswith("order:"))
 async def cb_order_status(cb: CallbackQuery):
+    def get_order_by_id(order_id: int, user_id: int) -> Order | None:
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            stmt = select(Order).where(Order.id == order_id, Order.user_id == user_id)
+            return sess.scalar(stmt)
     try:
         oid = int(cb.data.split(":")[1])
-        order = state.orders.get(oid)
+        order = get_order_by_id(oid, cb.from_user.id)
         if not order or order.user_id != cb.from_user.id:
             await cb.answer("Заказ не найден", show_alert=True)
             return
@@ -1397,14 +1378,31 @@ async def cb_order_status(cb: CallbackQuery):
         logger.error(f"Order status error: {e}")
         await cb.answer("Ошибка", show_alert=True)
 
+
 @r.callback_query(F.data == CallbackData.ORDERS.value)
 async def cb_orders_list(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    reset_waiting_flags(st)
-    if not st.is_authorized:
-        await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
-        await cb.answer(); return
-    ids = [oid for oid, o in state.orders.items() if o.user_id == cb.from_user.id]
+    try:
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            user = get_user_by_id(sess, cb.from_user.id)
+            if not user:
+                await cb.answer("Ошибка доступа", show_alert=True)
+                return
+
+            if not user.is_authorized:
+                await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
+                await cb.answer()
+                return
+
+            orders = get_user_orders_db(sess, cb.from_user.id)
+            ids = [o.id for o in orders]
+
+            sess.commit()
+    except Exception as e:
+        logger.error(f"DB error in cb_orders_list: {e}")
+        await cb.answer("Временная ошибка сервера. Попробуйте позже.", show_alert=True)
+        return
+
     if not ids:
         await edit_or_send(
             cb.message,
@@ -1416,21 +1414,27 @@ async def cb_orders_list(cb: CallbackQuery):
         )
     else:
         await edit_or_send(cb.message, "Ваши заказы:", kb_orders_list(ids))
+
     await cb.answer()
 
 @r.callback_query(F.data.startswith("change_addr:"))
 async def cb_change_addr(cb: CallbackQuery):
     try:
         oid = int(cb.data.split(":")[1])
-        order = state.orders.get(oid)
-        if not order or order.user_id != cb.from_user.id:
-            await cb.answer("Заказ не найден", show_alert=True)
-            return
 
-        st = ustate(cb.from_user.id)
-        reset_waiting_flags(st)
-        st.pvz_for_order_id = oid          # 👈 запоминаем, для какого заказа меняем адрес
-        st.awaiting_pvz_address = True
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            user = get_user_by_id(sess, cb.from_user.id)
+            if not user:
+                await cb.answer("Ошибка доступа", show_alert=True)
+                return
+
+            order = get_order_by_id(oid, cb.from_user.id)
+            if not order:
+                await cb.answer("Заказ не найден", show_alert=True)
+                return
+
+        user.pvz_for_order_id = oid
 
         await cb.message.answer(
             "Введите новый адрес ПВЗ (например: «Профсоюзная, 93»):",
@@ -1464,7 +1468,7 @@ async def cb_admin_orders_prepaid(cb: CallbackQuery):
         logger.info("Admin access denied")
         await cb.answer("Доступ запрещён", show_alert=True)
         return
-    orders = [o for o in state.orders.values() if o.status == OrderStatus.PREPAID.value]
+    orders = get_all_orders_by_status(OrderStatus.PREPAID.value)
     if not orders:
         await edit_or_send(cb.message, "Нет заказов для сборки.", kb_admin_panel())
     else:
@@ -1478,7 +1482,7 @@ async def cb_admin_orders_ready(cb: CallbackQuery):
         logger.info("Admin access denied")
         await cb.answer("Доступ запрещён", show_alert=True)
         return
-    orders = [o for o in state.orders.values() if o.status == OrderStatus.READY.value]
+    orders = get_all_orders_by_status(OrderStatus.READY.value)
     if not orders:
         await edit_or_send(cb.message, "Нет заказов с дооплатой или готовых к отправке.", kb_admin_panel())
     else:
@@ -1492,7 +1496,7 @@ async def cb_admin_orders_shipped(cb: CallbackQuery):
         logger.info("Admin access denied")
         await cb.answer("Доступ запрещён", show_alert=True)
         return
-    orders = [o for o in state.orders.values() if o.status == OrderStatus.SHIPPED.value]
+    orders = get_all_orders_by_status(OrderStatus.SHIPPED.value)
     if not orders:
         await edit_or_send(cb.message, "Нет отправленных заказов.", kb_admin_panel())
     else:
@@ -1506,7 +1510,7 @@ async def cb_admin_orders_archived(cb: CallbackQuery):
         logger.info("Admin access denied")
         await cb.answer("Доступ запрещён", show_alert=True)
         return
-    orders = [o for o in state.orders.values() if o.status == OrderStatus.ARCHIVED.value]
+    orders = get_all_orders_by_status(OrderStatus.ARCHIVED.value)
     if not orders:
         await edit_or_send(cb.message, "Архив пуст.", kb_admin_panel())
     else:
@@ -1518,7 +1522,7 @@ async def cb_admin_order_details(cb: CallbackQuery):
     logger.info(f"Order details callback: user_id={cb.from_user.id}, data={cb.data}")
     try:
         oid = int(cb.data.split(":")[2])
-        order = state.orders.get(oid)
+        order = get_order_by_id(oid, 0)
         if not order:
             await cb.answer("Заказ не найден", show_alert=True)
             return
@@ -1538,7 +1542,7 @@ async def cb_admin_set_ready(cb: CallbackQuery):
     logger.info(f"Set ready callback: user_id={cb.from_user.id}, data={cb.data}")
     try:
         oid = int(cb.data.split(":")[2])  # Извлекаем oid из третьей части (admin:set_ready:1)
-        order = state.orders.get(oid)
+        order = get_order_by_id(oid, 0)
         if not order or order.status != OrderStatus.PREPAID.value:
             await cb.answer("Нельзя перевести в готовность", show_alert=True)
             return
@@ -1562,7 +1566,7 @@ async def cb_admin_set_archived(cb: CallbackQuery):
     logger.info(f"Set archived callback: user_id={cb.from_user.id}, data={cb.data}")
     try:
         oid = int(cb.data.split(":")[2])  # Извлекаем oid из третьей части (admin:set_archived:1)
-        order = state.orders.get(oid)
+        order = get_order_by_id(oid, 0)
         if not order or order.status not in [OrderStatus.PAID.value, OrderStatus.SHIPPED.value]:
             await cb.answer("Нельзя архивировать заказ", show_alert=True)
             return
@@ -1586,14 +1590,19 @@ async def cb_admin_set_archived(cb: CallbackQuery):
             return
         try:
             oid = int(cb.data.split(":")[1])
-            order = state.orders.get(oid)
+            order = get_order_by_id(oid, 0)
             if not order:
                 await cb.answer("Заказ не найден")
                 return
             # Сохраняем, что админ ждёт трек для этого заказа
-            st = ustate(cb.from_user.id)
-            st.awaiting_manual_track = True
-            st.temp_order_id_for_track = oid
+            engine = make_engine(Config.DB_PATH)
+            with Session(engine) as sess:
+                user = get_user_by_id(sess, cb.from_user.id)
+                if not user:
+                    await cb.answer("Ошибка доступа", show_alert=True)
+                    return
+            user.awaiting_manual_track = True
+            user.temp_order_id_for_track = oid
             await cb.message.answer(
                 f"Введите трек-номер для заказа #{oid}:",
                 reply_markup=create_inline_keyboard(
@@ -1605,110 +1614,17 @@ async def cb_admin_set_archived(cb: CallbackQuery):
             await cb.answer("Ошибка")
 
 
-# ========== TEXT HANDLERS ==========
-async def handle_contact(message: Message, ust: UserState, text: str):
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    if len(lines) != 3:
-        await message.answer("Введите 3 строки: Имя Фамилия, +7..., email."); return
-    full_name, phone, email = lines
-    ok, msg = validate_data(full_name, phone, email)
-    if not ok:
-        await message.answer(msg + "\nПопробуйте снова."); return
-    ust.awaiting_contact = False
-    ust.full_name, ust.phone, ust.email = full_name, phone, email
-    await message.answer(f"Успешно, {message.from_user.first_name}! Вы в системе.", reply_markup=kb_cabinet())
-
-async def handle_pvz_address(message: Message, ust: UserState, text: str):
-    query = text.strip()
-    if len(query) < 3:
-        await message.answer("Слишком короткий запрос. Укажи хотя бы часть адреса или название города.")
-        return
-
-    # Определяем город по тексту
-    city_name = None
-    city_code = None
-
-    lower = query.lower()
-    for name, code in Config.POPULAR_CITIES.items():
-        if name.lower() in lower or name.lower().split()[0] in lower:
-            city_name = name
-            city_code = code
-            break
-
-    await message.answer("Ищу ПВЗ по всей России…")
-    pvz_list = await find_best_pvz(query, city=city_name, limit=20)
-
-    if not pvz_list:
-        await message.answer(
-            f"Не нашёл ПВЗ по такому адресу.\nПопробуй ввести адрес точнее или другой город.",
-            parse_mode="HTML",
-            reply_markup=create_inline_keyboard([
-                [{"text": "Попробовать ещё раз", "callback_data": "pvz_reenter"}],
-                [{"text": "В меню", "callback_data": CallbackData.MENU.value}]
-            ])
-        )
-        return
-
-    # Сохраняем найденные ПВЗ и город
-    ust.temp_pvz_list = pvz_list
-    ust.extra_data["city"] = city_name
-    ust.extra_data["city_code"] = city_code
-
-    await message.answer(
-        f"Нашёл {len(pvz_list)} ПВЗ в <b>{city_name}</b>.\nВыбери нужный ниже:",
-        parse_mode="HTML",
-        reply_markup=kb_pvz_list(pvz_list)
-    )
-
-
-async def handle_manual_pvz(message: Message, ust: UserState, text: str):
-    desc = text.strip()
-    if not desc:
-        await message.answer("Опиши ПВЗ: код или полный адрес.")
-        return
-
-    ust.awaiting_manual_pvz = False
-
-    # 1) Если мы в режиме "меняем адрес у конкретного заказа"
-    if ust.pvz_for_order_id and ust.pvz_for_order_id in state.orders:
-        order = state.orders[ust.pvz_for_order_id]
-        ust.pvz_for_order_id = None
-
-        order.shipping_method = "cdek_pvz_manual"
-        order.address = desc
-        order.extra_data["pvz_manual"] = desc
-
-        await notify_admins_order_address_changed(order)
-
-        kb = kb_ready_message(order) if order.status == OrderStatus.READY.value else kb_order_status(order)
-        await message.answer(
-            f"Адрес ПВЗ для заказа #{order.id} обновлён.\n\n{desc}",
-            reply_markup=kb
-        )
-        return
-
-    # 2) Обычный сценарий оформления нового заказа
-    order = state.new_order(message.from_user.id)
-    order.shipping_method = "cdek_pvz_manual"
-    order.address = desc
-    order.extra_data = {"pvz_manual": desc}
-
-    await notify_admins_payment_started(order)
-
-    await message.answer(
-        "Зафиксировали ПВЗ вручную.\n"
-        "Адрес/код для сбора заказа:\n"
-        f"{desc}\n\n" + format_order_review(order),
-        reply_markup=kb_review(order)
-    )
-
-
 @r.callback_query(F.data == "pvz_reenter")
 async def cb_pvz_reenter(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
     # НЕ сбрасываем pvz_for_order_id, чтобы помнить, редактируем ли заказ
-    st.awaiting_pvz_address = True
-    st.awaiting_manual_pvz = False
+    # user.awaiting_pvz_address = True
+    user.awaiting_manual_pvz = False
 
     await cb.message.edit_text(
         "Введите адрес ПВЗ ещё раз (например: Барклая, 5А):",
@@ -1716,21 +1632,28 @@ async def cb_pvz_reenter(cb: CallbackQuery):
             [{"text": "Отмена", "callback_data": CallbackData.MENU.value}]
         ])
     )
+    sess.commit()
     await cb.answer()
 
 
 @r.callback_query(F.data == "pvz_backlist")
 async def cb_pvz_backlist(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    if not st.temp_pvz_list:
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+    if not user.temp_pvz_list:
         await cb.answer("Список устарел, введите адрес заново", show_alert=True)
         return
 
     await edit_or_send(
         cb.message,
         "Выбери нужный ПВЗ:",
-        kb_pvz_list(st.temp_pvz_list)
+        kb_pvz_list(user.temp_pvz_list)
     )
+    sess.commit()
     await cb.answer()
 
 
@@ -1738,16 +1661,21 @@ async def cb_pvz_backlist(cb: CallbackQuery):
 # === ОБНОВЛЁННЫЙ обработчик выбора ПВЗ ===
 @r.callback_query(lambda c: (c.data or "").startswith("pvz_sel:"))
 async def cb_pvz_select(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
     try:
         _, old_code, idx_str = cb.data.split(":")
         idx = int(idx_str)
 
-        if not (0 <= idx < len(st.temp_pvz_list)):
+        if not (0 <= idx < len(user.temp_pvz_list)):
             await cb.answer("Список ПВЗ устарел — введите адрес заново", show_alert=True)
             return
 
-        pvz = st.temp_pvz_list[idx]
+        pvz = user.temp_pvz_list[idx]
 
         # Правильно парсим код
         raw_code = pvz.get("code")
@@ -1770,7 +1698,7 @@ async def cb_pvz_select(cb: CallbackQuery):
         work_time = pvz.get("work_time") or "Пн–Пт 10:00–20:00, Сб–Вс 10:00–18:00"
 
         # Сохраняем выбранный ПВЗ
-        st.temp_selected_pvz = {
+        user.temp_selected_pvz = {
             "code": real_code,
             "address": full_address,
             "work_time": work_time
@@ -1791,15 +1719,23 @@ async def cb_pvz_select(cb: CallbackQuery):
         prepay = (total * Config.PREPAY_PERCENT + 99) // 100
 
         # ←←← СОЗДАЁМ ЗАКАЗ СРАЗУ ЗДЕСЬ ←←←
-        order = state.new_order(cb.from_user.id)
-        order.shipping_method = "cdek_pvz"
-        order.address = full_address
-        order.total_price = total
-        order.extra_data.update({
-            "pvz_code": real_code,
-            "delivery_cost": delivery_cost,
-            "delivery_period": period_text,
-        })
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            order = create_order_db(
+                sess,
+                user_id=cb.from_user.id,
+                product_id=1,  # ID коробочки "anxiety" из БД
+                status=OrderStatus.NEW.value,
+                shipping_method="cdek_pvz",
+                address=full_address,
+                total_price_kop=(total * 100),  # в копейках!
+                delivery_cost_kop=(delivery_cost * 100),
+                extra_data={
+                    "pvz_code": real_code,
+                    "delivery_cost": delivery_cost,
+                    "delivery_period": period_text,
+                }
+            )
 
         # ←←← ВАЖНО: используем правильные callback_data! ←←←
         await edit_or_send(
@@ -1821,7 +1757,7 @@ async def cb_pvz_select(cb: CallbackQuery):
         )
         await cb.answer("Готово!")
 
-        st.awaiting_gift_message = True
+        user.awaiting_gift_message = True
         await cb.message.answer(
             "Хотите добавить личное послание в подарок получателю?\n(Текст будет вложен в коробочку)",
             reply_markup=create_inline_keyboard([
@@ -1834,31 +1770,48 @@ async def cb_pvz_select(cb: CallbackQuery):
     except Exception as e:
         logger.error(f"cb_pvz_select error: {e}", exc_info=True)
         await cb.answer("Ошибка", show_alert=True)
+    sess.commit()
 
 
 @r.callback_query(F.data.startswith("gift:"))
 async def cb_gift_message(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+
     if cb.data == "gift:yes":
-        st.awaiting_gift_message = True
-        st.gift_message = None
+        # user.awaiting_gift_message = True
+        # user.gift_message = None
         await cb.message.answer(
             "Напишите текст послания (до 300 символов):",
             reply_markup=create_inline_keyboard([[{"text": "Отмена", "callback_data": "gift:cancel"}]])
         )
     else:
-        st.awaiting_gift_message = False
-        order = list(state.orders.values())[-1]
-        await show_review(cb.message, order)
+        # user.awaiting_gift_message = False
+        orders = get_user_orders_db(sess, cb.from_user.id)
+        if orders:
+            order = orders[-1]  # самый новый
+            await show_review(cb.message, order)
+        else:
+            await cb.message.answer("У вас нет заказов.")
+    sess.commit()
     await cb.answer()
 
 
 @r.callback_query(F.data == "pvz_manual")
 async def cb_pvz_manual(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
     # Сбрасываем только ожидания текста, но НЕ pvz_for_order_id
-    st.awaiting_pvz_address = False
-    st.awaiting_manual_pvz = True
+    user.awaiting_pvz_address = False
+    user.awaiting_manual_pvz = True
 
     await cb.message.edit_text(
         "Напиши код ПВЗ (например, MSK123) или полный адрес пункта выдачи так, как он указан у СДЭК.\n\n"
@@ -1868,17 +1821,23 @@ async def cb_pvz_manual(cb: CallbackQuery):
             [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
         ])
     )
+    sess.commit()
     await cb.answer()
 
 
 @r.callback_query(F.data == "pvz_back")
 async def cb_pvz_back(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    pvz_list = st.temp_pvz_list
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+    pvz_list = user.temp_pvz_list
 
     if not pvz_list:
         # вдруг бот перезапустился и память очистилась
-        st.awaiting_pvz_address = True
+        # user.awaiting_pvz_address = True
         await cb.message.edit_text(
             "Список ПВЗ устарел.\nВведите адрес ПВЗ ещё раз (например: Барклая, 5А):",
             reply_markup=create_inline_keyboard([
@@ -1888,53 +1847,65 @@ async def cb_pvz_back(cb: CallbackQuery):
         await cb.answer()
         return
 
-    query = st.extra_data.get("pvz_query", "выбранным адресом")
+    query = user.extra_data.get("pvz_query", "выбранным адресом")
 
     await edit_or_send(
         cb.message,
         f"Нашёл {len(pvz_list)} ПВЗ рядом с «{query}» (Москва).\nВыбери нужный:",
         kb_pvz_list(pvz_list)
     )
+    sess.commit()
     await cb.answer()
 
 
 @r.callback_query(F.data == "pvz_confirm")
 async def cb_pvz_confirm(cb: CallbackQuery):
-    st = ustate(cb.from_user.id)
-    if not st.temp_selected_pvz:
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+    if not user.temp_selected_pvz:
         await cb.answer("Ошибка выбора", show_alert=True)
         return
 
-    pvz = st.temp_selected_pvz
+    pvz = user.temp_selected_pvz
     code = pvz["code"]
+    full_address = pvz["address"]  # добавляем
+    real_code = code  # добавляем
 
     await cb.message.answer("Считаю стоимость и срок доставки…")
-    delivery_info = await calculate_cdek_delivery_cost(st.temp_selected_pvz["code"])
+    delivery_info = await calculate_cdek_delivery_cost(str(code))
 
     if delivery_info is None:
         delivery_cost = 590
         period_text = "3–7"
-        period_min = 3
-        period_max = 7
     else:
         delivery_cost = delivery_info["cost"]
         pmin = delivery_info["period_min"]
         pmax = delivery_info["period_max"] or pmin + 2
         period_text = f"{pmin}" if pmin == pmax else f"{pmin}–{pmax}"
-        period_min = pmin
-        period_max = pmax
 
-    # ←←← СОЗДАЁМ ЗАКАЗ ЗДЕСЬ ←←←
-    order = state.new_order(cb.from_user.id)
-    order.shipping_method = "cdek_pvz"
-    order.address = pvz["address"]
-    order.extra_data.update({
-        "pvz_code": code,
-        "delivery_cost": delivery_cost,
-        "delivery_period": period_text,          # ← это будет показываться в статусе
-        "delivery_period_min": period_min,
-        "delivery_period_max": period_max,
-    })
+    total = Config.PRICE_RUB + delivery_cost  # добавляем
+
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        order = create_order_db(
+            sess,
+            user_id=cb.from_user.id,
+            status=OrderStatus.NEW.value,
+            shipping_method="cdek_pvz",
+            address=full_address,
+            total_price_kop=(total * 100),
+            delivery_cost_kop=(delivery_cost * 100),
+            extra_data={
+                "pvz_code": real_code,
+                "delivery_cost": delivery_cost,
+                "delivery_period": period_text,
+            }
+        )
+        sess.commit()
 
     total = Config.PRICE_RUB + delivery_cost
     order.total_price = total
@@ -1956,88 +1927,29 @@ async def cb_pvz_confirm(cb: CallbackQuery):
             [{"text": "Назад", "callback_data": CallbackData.GALLERY.value}],
         ])
     )
+    sess.commit()
     await cb.answer("Готово!")
 
 
 @r.message()
 async def on_text(message: Message):
-    uid = message.from_user.id
-    st = ustate(uid)
-    text = (message.text or "").strip()
-    low = text.lower()
+    text = (message.text or "").strip().lower()
 
     if text.startswith("/"):
         if text.startswith("/admin "):
             await handle_admin_command(message, text)
         return
-    if low in {"меню", "/menu"}: await cmd_menu(message); return
-    if low in {"мои практики", "практики"}:
+
+    if text in {"меню", "/menu"}:
+        await cmd_menu(message)
+    elif text in {"мои практики", "практики"}:
         await cb_practices(type("obj", (), {"from_user": message.from_user, "message": message, "answer": lambda *a, **k: None, "data": ""})())
-        return
-    if low in {"личный кабинет", "кабинет"}:
+    elif text in {"личный кабинет", "кабинет"}:
         await cb_cabinet(type("obj", (), {"from_user": message.from_user, "message": message, "answer": lambda *a, **k: None})())
-        return
-    if low in {"заказать"}:
+    elif text in {"заказать"}:
         await cb_checkout_start(type("obj", (), {"from_user": message.from_user, "message": message, "answer": lambda *a, **k: None})())
-        return
-
-    if st.awaiting_code: await handle_code(message, st, text); return
-    if st.awaiting_contact: await handle_contact(message, st, text); return
-    if st.awaiting_manual_pvz: await handle_manual_pvz(message, st, text); return
-    if st.awaiting_pvz_address: await handle_pvz_address(message, st, text); return
-
-    if st.awaiting_pvz_address: await handle_pvz_address(message, st, text); return
-
-    # ←←← ОБРАБОТКА ПОДАРОЧНОГО ПОСЛАНИЯ ←←←
-    if st.awaiting_gift_message:
-        text = text.strip()
-        if len(text) > 300:
-            await message.answer("Слишком длинное послание (максимум 300 символов). Попробуйте короче.")
-            return
-        if len(text) == 0:
-            await message.answer("Послание пустое — отменяем добавление.")
-            st.awaiting_gift_message = False
-            # Показываем обзор последнего заказа пользователя
-            user_orders = [o for o in state.orders.values() if o.user_id == uid]
-            if user_orders:
-                order = user_orders[-1]
-                await show_review(message, order)
-            return
-
-        st.gift_message = text
-        st.awaiting_gift_message = False
-
-        # Сохраняем в последний заказ пользователя
-        user_orders = [o for o in state.orders.values() if o.user_id == uid]
-        if user_orders:
-            order = user_orders[-1]
-            order.extra_data["gift_message"] = text
-            await message.answer(
-                f"Послание добавлено:\n\n<i>{text}</i>\n\nТеперь финальный обзор заказа:",
-                parse_mode="HTML"
-            )
-            await show_review(message, order)
-        return
-
-    if st.awaiting_manual_track:
-        track = text.strip()
-        if not track:
-            await message.answer("Трек пустой — отменяем.")
-            st.awaiting_manual_track = False
-            return
-        oid = st.temp_order_id_for_track
-        st.awaiting_manual_track = False
-        st.temp_order_id_for_track = None
-        order = state.orders.get(oid)
-        if order:
-            order.track = track
-            order.status = OrderStatus.SHIPPED.value
-            await notify_admins_order_shipped(order)
-            await bot.send_message(order.user_id, f"Ваш заказ #{oid} отправлен! Трек-номер: {track}")
-            await message.answer(f"Трек {track} сохранён для заказа #{oid}")
-        return
-    
-    await message.answer("Не понял запрос. Воспользуйтесь меню.", reply_markup=kb_main())
+    else:
+        await message.answer("Не понял запрос. Воспользуйтесь меню.", reply_markup=kb_main())
 
 
 @r.callback_query()
@@ -2049,81 +1961,87 @@ async def catch_all_callbacks(cb: CallbackQuery):
 async def handle_admin_command(message: Message, text: str):
     if not await is_admin(message):
         return
+
     parts = text.split()
     if len(parts) < 2:
-        await message.answer("Использование: /admin <действие> [order_id] [track]\nДействия: list, ready, paid, shipped\nПримеры: /admin list, /admin ready 1, /admin shipped 1 PVZ123")
+        await message.answer(
+            "Использование: /admin <действие> [order_id] [track]\n"
+            "Действия: list, ready, shipped, archived"
+        )
         return
 
-    action, *args = parts[1], parts[2:]
+    action = parts[1].lower()
+    args = parts[2:]
 
-    if action == "list":
-        if not state.orders:
-            await message.answer("Нет заказов.")
-            return
-        def tag(o: Order) -> str:
-            return {
-                OrderStatus.NEW.value: "new",
-                OrderStatus.PENDING.value: "pending",
-                OrderStatus.PREPAID.value: "prepaid",
-                OrderStatus.READY.value: "ready",
-                OrderStatus.PAID.value: "paid",
-                OrderStatus.SHIPPED.value: "shipped",
-                OrderStatus.ARCHIVED.value: "archived",
-                OrderStatus.ABANDONED.value: "abandoned",
-            }.get(o.status, o.status)
-        rows = [f"#{oid}: {tag(o)} | {o.address or '—'} | {ustate(o.user_id).full_name or o.user_id}" for oid, o in state.orders.items()]
-        await message.answer("Заказы:\n" + "\n".join(rows))
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
 
-    elif action == "ready":
-        if len(args) == 0 or not args[0].isdigit():
-            await message.answer(f"Укажите order_id. Пример: /admin ready 1")
-            return
-        order_id = int(args[0])
-        order = state.orders.get(order_id)
-        if order and order.status == OrderStatus.PREPAID.value:
-            cancel_payment_timeout(order_id)
-            order.status = OrderStatus.READY.value
-            await notify_admins_order_ready(order)
-            await notify_client_order_ready(order, message)
-            await message.answer(f"✅ Заказ #{order_id}: READY")
+        if action == "list":
+            all_orders = sess.scalars(select(Order)).all()
+            if not all_orders:
+                await message.answer("Нет заказов.")
+                return
+
+            def tag(o: Order) -> str:
+                return {
+                    OrderStatus.NEW.value: "new",
+                    OrderStatus.PREPAID.value: "prepaid",
+                    OrderStatus.READY.value: "ready",
+                    OrderStatus.PAID.value: "paid",
+                    OrderStatus.SHIPPED.value: "shipped",
+                    OrderStatus.ARCHIVED.value: "archived",
+                }.get(o.status, o.status)
+
+            rows = [f"#{o.id}: {tag(o)} | {o.address or '—'} | user_{o.user_id}" for o in all_orders]
+            await message.answer("Заказы:\n" + "\n".join(rows[:50]))  # лимит, чтобы не спамить
+
+        elif action in ["ready", "shipped", "archived"]:
+            if not args or not args[0].isdigit():
+                await message.answer(f"Укажите order_id. Пример: /admin {action} 1")
+                return
+
+            order_id = int(args[0])
+            order = sess.get(Order, order_id)
+            if not order:
+                await message.answer(f"Заказ #{order_id} не найден.")
+                return
+
+            if action == "ready":
+                if order.status != OrderStatus.PREPAID.value:
+                    await message.answer("Заказ не в статусе предоплаты.")
+                    return
+                order.status = OrderStatus.READY.value
+                await notify_admins_order_ready(order)
+                await notify_client_order_ready(order, message)
+                await message.answer(f"Заказ #{order_id} переведён в READY")
+
+            elif action == "shipped":
+                track = args[1] if len(args) > 1 else None
+                if not track:
+                    await message.answer("Укажите трек-номер: /admin shipped 1 ТРЕК123")
+                    return
+                if order.status not in [OrderStatus.READY.value, OrderStatus.PAID.value]:
+                    await message.answer("Заказ не готов к отправке.")
+                    return
+                order.status = OrderStatus.SHIPPED.value
+                # предположим, что в модели Order есть поле track (строка)
+                order.track = track
+                await notify_admins_order_shipped(order)
+                await notify_client_order_shipped(order, message)
+                await message.answer(f"📦 Заказ #{order_id} отправлен! Трек: {track}")
+
+            elif action == "archived":
+                if order.status not in [OrderStatus.PAID.value, OrderStatus.SHIPPED.value]:
+                    await message.answer("Заказ не может быть заархивирован.")
+                    return
+                order.status = OrderStatus.ARCHIVED.value
+                await notify_admins_order_archived(order)
+                await message.answer(f"🗄 Заказ #{order_id} заархивирован")
+
+            sess.commit()
+
         else:
-            await message.answer(f"Заказ #{order_id} не найден или не в предоплате.")
-
-    elif action == "shipped":
-        if len(args) < 1 or not args[0].isdigit():
-            await message.answer("Укажите order_id. Пример: /admin shipped 1 PVZ123")
-            return
-        order_id = int(args[0])
-        track = args[1] if len(args) > 1 else None
-        if not track:
-            await message.answer("Укажите трек. Пример: /admin shipped 1 PVZ123")
-            return
-        order = state.orders.get(order_id)
-        if order and order.status in [OrderStatus.READY.value, OrderStatus.PAID.value]:
-            cancel_payment_timeout(order_id)
-            order.status = OrderStatus.SHIPPED.value
-            order.track = track
-            await notify_admins_order_shipped(order)
-            await notify_client_order_shipped(order, message)
-            await message.answer(f"📦 Заказ #{order_id} отправлен! Трек: {track}")
-        else:
-            await message.answer(f"Заказ #{order_id} не найден или не готов к отправке.")
-
-    elif action == "archived":
-        if len(args) == 0 or not args[0].isdigit():
-            await message.answer(f"Укажите order_id. Пример: /admin archived 1")
-            return
-        order_id = int(args[0])
-        order = state.orders.get(order_id)
-        if order and order.status in [OrderStatus.PAID.value, OrderStatus.SHIPPED.value]:
-            order.status = OrderStatus.ARCHIVED.value
-            await notify_admins_order_archived(order)
-            await message.answer(f"🗄 Заказ #{order_id} заархивирован")
-        else:
-            await message.answer(f"Заказ #{order_id} не найден или не может быть заархивирован.")
-
-    else:
-        await message.answer("Неверное действие. Доступные: list, ready, shipped, archived")
+            await message.answer("Неизвестное действие. Доступно: list, ready, shipped, archived")
 
 # ========== НОВЫЕ ФУНКЦИИ СДЭК ==========
 
@@ -2395,11 +2313,12 @@ async def check_all_shipped_orders():
     while True:
         try:
             logger.info("Запуск проверки статусов СДЭК...")
-            orders_to_check = [
-                order for order in state.orders.values()
-                if order.status == OrderStatus.SHIPPED.value
-                and order.extra_data.get("cdek_uuid")
-            ]
+            orders_to_check = get_all_orders_by_status(OrderStatus.SHIPPED.value)
+            # orders_to_check = [
+            #     # order for order in state.orders.values()
+            #     if order.status == OrderStatus.SHIPPED.value
+            #     and order.extra_data.get("cdek_uuid")
+            # ]
 
             for order in orders_to_check:
                 uuid = order.extra_data["cdek_uuid"]
@@ -2437,7 +2356,7 @@ async def check_all_shipped_orders():
                     await notify_admin(
                         f"Трек-номер пришёл!\n"
                         f"Заказ #{order.id} → <code>{new_track}</code>\n"
-                        f"Клиент: {ustate(order.user_id).full_name or 'Неизвестно'}"
+                        # f"Клиент: {ustate(order.user_id).full_name or 'Неизвестно'}"
                     )
 
                 # === 2. Уведомления об изменении статуса (опционально, только важные) ===
