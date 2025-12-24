@@ -956,48 +956,37 @@ async def cb_auth_start(cb: CallbackQuery):
 @r.callback_query(F.data == CallbackData.GALLERY.value)
 async def cb_gallery(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
-    try:
-        engine = make_engine(Config.DB_PATH)
-        with Session(engine) as sess:
-            user = get_user_by_id(sess, cb.from_user.id)
-            if not user:
-                await cb.answer("Ошибка доступа", show_alert=True)
-                return
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
 
-            if not user.is_authorized:
-                await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
-                await cb.answer()
-                return
+        if not user.is_authorized:
+            await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
+            await cb.answer()
+            return
 
-            orders = get_user_orders_db(sess, cb.from_user.id)
-            ids = [o.id for o in orders]
+        if user.gallery_viewed:
+            await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=user.team_viewed))
+            await cb.answer()
+            return
 
-            sess.commit()  # на всякий случай
-    except Exception as e:
-        logger.error(f"DB error in cb_orders_list: {e}")
-        await cb.answer("Временная ошибка сервера. Попробуйте позже.", show_alert=True)
-        return
+        try:
+            await cb.message.answer("Загружаю видео знакомства...")
+            await cb.message.answer_document(document=Config.VIDEO1_ID, caption="Видео 1")
+            await cb.message.answer_document(document=Config.VIDEO2_ID, caption="Видео 2")
+            await cb.message.answer_document(document=Config.VIDEO3_ID, caption="Видео 3 - Часть 1")
+            await cb.message.answer_document(document=Config.VIDEO4_ID, caption="Видео 4 - Часть 2")
+            await cb.message.answer_document(document=Config.VIDEO5_ID, caption="Видео 5 - Часть 3")
+        except Exception as e:
+            logger.error(f"Failed to send gallery videos: {e}")
+            await cb.message.answer("Ошибка при загрузке видео. Свяжитесь с администратором.")
 
-    if user.gallery_viewed:
         await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=user.team_viewed))
-        await cb.answer()
-        return
 
-    try:
-        await cb.message.answer("Загружаю видео знакомства...")
-        await cb.message.answer_document(document=Config.VIDEO1_ID, caption="Видео 1")
-        await cb.message.answer_document(document=Config.VIDEO2_ID, caption="Видео 2")
-        await cb.message.answer_document(document=Config.VIDEO3_ID, caption="Видео 3 - Часть 1")
-        await cb.message.answer_document(document=Config.VIDEO4_ID, caption="Видео 4 - Часть 2")
-        await cb.message.answer_document(document=Config.VIDEO5_ID, caption="Видео 5 - Часть 3")
-    except Exception as e:
-        logger.error(f"Failed to send gallery videos: {e}")
-        await cb.message.answer("Ошибка при загрузке видео. Свяжитесь с администратором.")
-
-    await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=user.team_viewed))
-
-    user.gallery_viewed = True
-    sess.commit()
+        user.gallery_viewed = True
+        sess.commit()
     await cb.answer()
 
 @r.callback_query(F.data == CallbackData.FAQ.value)
@@ -1168,29 +1157,24 @@ async def cb_change_contact(cb: CallbackQuery):
 @r.callback_query(F.data.in_(["menu", "gallery", "cabinet", "faq", "team", "practices", "orders"]))
 async def cb_simple_navigation(cb: CallbackQuery):
     data = cb.data
-
-    if data == "menu":
-        await edit_or_send(cb.message, "Выбери действие:", kb_main())
-    elif data == "gallery":
-        # Просто вызываем существующий хендлер галереи
-        await cb_gallery(cb)
-        return
-    elif data == "cabinet":
-        await cb_cabinet(cb)
-        return
-    elif data == "faq":
-        await cb_faq(cb)
-        return
-    elif data == "team":
-        await cb_team(cb)
-        return
-    elif data == "practices":
-        await cb_practices(cb)
-        return
-    elif data == "orders":
-        await cb_orders_list(cb)
-        return
-
+    try:
+        if data == "menu":
+            await edit_or_send(cb.message, "Выбери действие:", kb_main())
+        elif data == "gallery":
+            await cb_gallery(cb)
+        elif data == "cabinet":
+            await cb_cabinet(cb)
+        elif data == "faq":
+            await cb_faq(cb)
+        elif data == "team":
+            await cb_team(cb)
+        elif data == "practices":
+            await cb_practices(cb)
+        elif data == "orders":
+            await cb_orders_list(cb)
+    except Exception as e:
+        logger.error(f"Navigation error for {data}: {e}")
+        await cb.answer("Ошибка навигации. Попробуйте заново.", show_alert=True)
     await cb.answer()
 
 
