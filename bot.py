@@ -1164,25 +1164,16 @@ async def cb_change_contact(cb: CallbackQuery):
     await cb.answer()
 
 
-# ========== UNIVERSAL BACK HANDLERS ==========
-@r.callback_query(F.data.in_({"gallery", "cabinet", "menu", "faq", "team"}))
-async def cb_back_navigation(cb: CallbackQuery):
+# ========== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК "НАЗАД" И ПРОСТЫХ НАВИГАЦИОННЫХ КНОПОК ==========
+@r.callback_query(F.data.in_(["menu", "gallery", "cabinet", "faq", "team", "practices", "orders"]))
+async def cb_simple_navigation(cb: CallbackQuery):
     data = cb.data
 
     if data == "menu":
         await edit_or_send(cb.message, "Выбери действие:", kb_main())
     elif data == "gallery":
-        engine = make_engine(Config.DB_PATH)
-        with Session(engine) as sess:
-            user = get_user_by_id(sess, cb.from_user.id)
-            if user and user.gallery_viewed:
-                await cb.message.answer(Config.GALLERY_TEXT,
-                                        reply_markup=kb_gallery(team_shown=user.team_viewed or False))
-            else:
-                # Если галерея ещё не показана — можно показать видео (как в cb_gallery)
-                # Или просто текст
-                await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=False))
-        await cb.answer()
+        # Просто вызываем существующий хендлер галереи
+        await cb_gallery(cb)
         return
     elif data == "cabinet":
         await cb_cabinet(cb)
@@ -1192,6 +1183,12 @@ async def cb_back_navigation(cb: CallbackQuery):
         return
     elif data == "team":
         await cb_team(cb)
+        return
+    elif data == "practices":
+        await cb_practices(cb)
+        return
+    elif data == "orders":
+        await cb_orders_list(cb)
         return
 
     await cb.answer()
