@@ -640,51 +640,6 @@ async def edit_or_send(
         await msg.answer(text, reply_markup=reply_markup)
 
 # ========== КОМАНДА ТЕСТА СДЭК (РАБОЧАЯ!) ==========
-@r.message()
-async def handle_pvz_address(message: Message):
-    engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
-        user = get_user_by_id(sess, message.from_user.id)
-        if not user:
-            return
-
-        sess.refresh(user)  # Принудительно перечитываем из БД
-
-        logger.info(f"handle_pvz_address: user={user.telegram_id}, awaiting={user.awaiting_pvz_address}")
-
-        if user.awaiting_pvz_address:
-            address = message.text.strip()
-            ok, msg = validate_address(address)
-            if not ok:
-                await message.answer(f"Ошибка формата адреса: {msg}\nПопробуйте ещё раз.")
-                return
-
-            user.extra_data["pvz_query"] = address
-            user.awaiting_pvz_address = False
-            sess.commit()
-
-            await message.answer("Ищу ближайшие ПВЗ СДЭК...")
-
-            pvz_list = await find_best_pvz(address, city="Москва")
-            if not pvz_list:
-                await message.answer("Не нашёл ПВЗ.\nПопробуйте другой адрес.")
-                return
-
-            user.temp_pvz_list = pvz_list
-            sess.commit()
-
-            await message.answer(
-                f"Нашёл {len(pvz_list)} ПВЗ рядом с «{address}».\nВыбери нужный:",
-                reply_markup=kb_pvz_list(pvz_list)
-            )
-            return
-
-    await handle_auth_input(message)
-
-    # Если не ввод адреса — передаём дальше
-    await handle_auth_input(message)
-
-
 @r.message(Command("test_cdek_token"))
 async def cmd_test_cdek_token(message: Message):
     if not await is_admin(message):
@@ -1996,6 +1951,51 @@ async def cb_pvz_confirm(cb: CallbackQuery):
     )
     sess.commit()
     await cb.answer("Готово!")
+
+
+@r.message()
+async def handle_pvz_address(message: Message):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, message.from_user.id)
+        if not user:
+            return
+
+        sess.refresh(user)  # Принудительно перечитываем из БД
+
+        logger.info(f"handle_pvz_address: user={user.telegram_id}, awaiting={user.awaiting_pvz_address}")
+
+        if user.awaiting_pvz_address:
+            address = message.text.strip()
+            ok, msg = validate_address(address)
+            if not ok:
+                await message.answer(f"Ошибка формата адреса: {msg}\nПопробуйте ещё раз.")
+                return
+
+            user.extra_data["pvz_query"] = address
+            user.awaiting_pvz_address = False
+            sess.commit()
+
+            await message.answer("Ищу ближайшие ПВЗ СДЭК...")
+
+            pvz_list = await find_best_pvz(address, city="Москва")
+            if not pvz_list:
+                await message.answer("Не нашёл ПВЗ.\nПопробуйте другой адрес.")
+                return
+
+            user.temp_pvz_list = pvz_list
+            sess.commit()
+
+            await message.answer(
+                f"Нашёл {len(pvz_list)} ПВЗ рядом с «{address}».\nВыбери нужный:",
+                reply_markup=kb_pvz_list(pvz_list)
+            )
+            return
+
+    await handle_auth_input(message)
+
+    # Если не ввод адреса — передаём дальше
+    await handle_auth_input(message)
 
 
 @r.message()  # Это ловит ВСЕ текстовые сообщения
