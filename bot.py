@@ -640,34 +640,34 @@ async def edit_or_send(
         await msg.answer(text, reply_markup=reply_markup)
 
 # ========== КОМАНДА ТЕСТА СДЭК (РАБОЧАЯ!) ==========
-@r.message()  # Ловит текст, когда ждём адрес ПВЗ
+@r.message()
 async def handle_pvz_address(message: Message):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         user = get_user_by_id(sess, message.from_user.id)
         if not user:
             return
+
+        sess.refresh(user)  # Принудительно перечитываем из БД
+
         logger.info(f"handle_pvz_address: user={user.telegram_id}, awaiting={user.awaiting_pvz_address}")
 
         if user.awaiting_pvz_address:
             address = message.text.strip()
             ok, msg = validate_address(address)
-            user.awaiting_pvz_address = False
-            sess.commit()
             if not ok:
-                await message.answer(f"Ошибка формата адреса: {msg}\nПопробуйте ещё раз (например: Профсоюзная, 93).")
+                await message.answer(f"Ошибка формата адреса: {msg}\nПопробуйте ещё раз.")
                 return
 
-            # Сохраняем адрес и ищем ПВЗ
             user.extra_data["pvz_query"] = address
             user.awaiting_pvz_address = False
             sess.commit()
 
             await message.answer("Ищу ближайшие ПВЗ СДЭК...")
 
-            pvz_list = await find_best_pvz(address, city="Москва")  # или без city
+            pvz_list = await find_best_pvz(address, city="Москва")
             if not pvz_list:
-                await message.answer("Не нашёл ПВЗ по этому адресу 😔\nПопробуйте другой или введите код ПВЗ вручную.")
+                await message.answer("Не нашёл ПВЗ.\nПопробуйте другой адрес.")
                 return
 
             user.temp_pvz_list = pvz_list
@@ -678,6 +678,8 @@ async def handle_pvz_address(message: Message):
                 reply_markup=kb_pvz_list(pvz_list)
             )
             return
+
+    await handle_auth_input(message)
 
     # Если не ввод адреса — передаём дальше
     await handle_auth_input(message)
