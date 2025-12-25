@@ -2505,7 +2505,7 @@ async def check_all_shipped_orders():
 async def main():
     logger.info("Бот запущен - режим polling с автоматическим переподключением")
     logger.info("BOT VERSION MARK: 2025-12-23 FINAL")
-    asyncio.create_task(check_all_shipped_orders())
+
     engine = make_engine(Config.DB_PATH)
     init_db(engine)
 
@@ -2513,6 +2513,8 @@ async def main():
     with Session(engine) as sess:
         seed_data(sess, anxiety_codes=None)  # сюда потом список кодов
         sess.commit()
+
+    asyncio.create_task(check_all_shipped_orders())
 
     while True:
         try:
