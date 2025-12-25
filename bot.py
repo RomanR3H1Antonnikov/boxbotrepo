@@ -1149,7 +1149,6 @@ async def cb_change_contact(cb: CallbackQuery):
     else:
         user.awaiting_pvz_address = True
         sess.commit()
-        sess.refresh(user)
         await cb.message.answer(
             "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
@@ -1199,7 +1198,6 @@ async def cb_shipping_cdek(cb: CallbackQuery):
     user.pvz_for_order_id = None
     user.awaiting_pvz_address = True
     sess.commit()
-    sess.refresh(user)
 
     await cb.message.answer(
         "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
