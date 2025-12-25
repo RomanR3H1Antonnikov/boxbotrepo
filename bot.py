@@ -1148,6 +1148,7 @@ async def cb_change_contact(cb: CallbackQuery):
         )
     else:
         user.awaiting_pvz_address = True
+        sess.add(user)
         sess.commit()
         await cb.message.answer(
             "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
@@ -1197,6 +1198,7 @@ async def cb_shipping_cdek(cb: CallbackQuery):
 
     user.pvz_for_order_id = None
     user.awaiting_pvz_address = True
+    sess.add(user)
     sess.commit()
 
     await cb.message.answer(
@@ -2536,6 +2538,7 @@ async def main():
         seed_data(sess, anxiety_codes=None)
         sess.commit()
 
+    await asyncio.sleep(10)
     asyncio.create_task(check_all_shipped_orders())
 
     while True:
