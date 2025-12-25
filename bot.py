@@ -2512,16 +2512,18 @@ async def main():
     logger.info("Бот запущен - режим polling с автоматическим переподключением")
     logger.info("BOT VERSION MARK: 2025-12-23 FINAL")
 
+    # создаём БД и таблицы
     engine = make_engine(Config.DB_PATH)
     init_db(engine)
 
-    # Один раз засеять продукт и коды (можно закомментировать после первого запуска)
+    # Засеиваем данные (продукты, коды и т.д.)
     with Session(engine) as sess:
-        seed_data(sess, anxiety_codes=None)  # сюда потом список кодов
+        seed_data(sess, anxiety_codes=None)
         sess.commit()
 
     asyncio.create_task(check_all_shipped_orders())
 
+    # Polling
     while True:
         try:
             logger.info("Запуск polling с Telegram...")
