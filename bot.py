@@ -1992,8 +1992,6 @@ async def handle_pvz_address(message: Message):
             )
             return
 
-    await handle_auth_input(message)
-
     # Если не ввод адреса — передаём дальше
     await handle_auth_input(message)
 
