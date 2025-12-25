@@ -2415,16 +2415,21 @@ def kb_pvz_list(pvz_list: List[dict]) -> InlineKeyboardMarkup:
 last_status_cache: Dict[int, str] = {}  # order_id → status_text
 
 async def check_all_shipped_orders():
-    """Фоновая задача: проверяет статусы заказов в СДЭК и присылает трек-номер + обновления"""
+    from sqlalchemy import inspect  # импортируем здесь
+    engine = make_engine(Config.DB_PATH)  # свежий engine
+
+    await asyncio.sleep(5)  # Дай 5 сек на init_db (если гонка)
     while True:
         try:
+            # Проверяем наличие таблицы
+            inspector = inspect(engine)
+            if not inspector.has_table("orders"):
+                logger.warning("Таблица orders не существует - ждём 60 сек")
+                await asyncio.sleep(60)
+                continue
+
             logger.info("Запуск проверки статусов СДЭК...")
             orders_to_check = get_all_orders_by_status(OrderStatus.SHIPPED.value)
-            # orders_to_check = [
-            #     # order for order in state.orders.values()
-            #     if order.status == OrderStatus.SHIPPED.value
-            #     and order.extra_data.get("cdek_uuid")
-            # ]
 
             for order in orders_to_check:
                 uuid = order.extra_data["cdek_uuid"]
@@ -2512,18 +2517,23 @@ async def main():
     logger.info("Бот запущен - режим polling с автоматическим переподключением")
     logger.info("BOT VERSION MARK: 2025-12-23 FINAL")
 
-    # создаём БД и таблицы
     engine = make_engine(Config.DB_PATH)
     init_db(engine)
 
-    # Засеиваем данные (продукты, коды и т.д.)
+    from sqlalchemy import inspect
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    logger.info(f"Таблицы после init_db: {tables}")
+    if 'orders' not in tables:
+        logger.error("Таблица orders НЕ создана! Проверь import models в init_db.py")
+
+    # Засеиваем данные
     with Session(engine) as sess:
         seed_data(sess, anxiety_codes=None)
         sess.commit()
 
     asyncio.create_task(check_all_shipped_orders())
 
-    # Polling
     while True:
         try:
             logger.info("Запуск polling с Telegram...")
