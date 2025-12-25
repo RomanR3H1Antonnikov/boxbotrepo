@@ -38,10 +38,10 @@ class User(Base):
     is_authorized: Mapped[bool] = mapped_column(Boolean, default=False)  # вместо проверки full_name/phone/email
     practices: Mapped[list[str]] = mapped_column(JSON, default=list)  # для практик
     temp_selected_pvz: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # временные данные
-    awaiting_gift_message: Mapped[bool] = mapped_column(Boolean, default=False)
+    awaiting_gift_message: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     pvz_for_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    awaiting_pvz_address: Mapped[bool] = mapped_column(Boolean, default=False)
-    awaiting_manual_pvz: Mapped[bool] = mapped_column(Boolean, default=False)
+    awaiting_pvz_address: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    awaiting_manual_pvz: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     awaiting_manual_track: Mapped[bool] = mapped_column(Boolean, default=False)
     temp_order_id_for_track: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
