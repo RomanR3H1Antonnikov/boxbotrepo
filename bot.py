@@ -1010,34 +1010,40 @@ async def cb_team(cb: CallbackQuery):
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         if not user:
-            await cb.answer("Ошибка")
+            await cb.answer("Ошибка", show_alert=True)
             return
 
         if user.team_viewed:
-            await cb.answer("Команду уже показывали - смотри видеосообщения выше!", show_alert=True)
+            await cb.message.answer(
+                "Ты уже знаком с командой коробочки - смотри кружочки выше!",
+                reply_markup=kb_gallery(team_shown=True)
+            )
+            await cb.answer()
             return
 
         await cb.message.answer("Знакомься с командой коробочки!")
 
-    experts_order = ["anna", "maria", "alena", "alexey", "alexander"]
-    for key in experts_order:
-        info = Config.EXPERTS[key]
-        name = info["name"]
-        video_id = info.get("video_note_id")
-        if video_id:
-            try:
-                await cb.message.answer_video_note(video_id)
-            except Exception as e:
-                logger.error(f"Team video error ({key}): {e}")
-                await cb.message.answer("Ошибка загрузки видео")
-        await cb.message.answer(f"<b>{name}</b>", parse_mode=ParseMode.HTML)
-        await asyncio.sleep(0.6)
+        experts_order = ["anna", "maria", "alena", "alexey", "alexander"]
+        for key in experts_order:
+            info = Config.EXPERTS[key]
+            name = info["name"]
+            video_id = info.get("video_note_id")
+            if video_id:
+                try:
+                    await cb.message.answer_video_note(video_id)
+                except Exception as e:
+                    logger.error(f"Team video error ({key}): {e}")
+                    await cb.message.answer("Ошибка загрузки видео")
+            await cb.message.answer(f"<b>{name}</b>", parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.6)
 
-    user.team_viewed = True
-    sess.commit()
+        user.team_viewed = True
+        sess.commit()
 
-    await cb.message.answer("Теперь ты знаешь команду, приятно познакомиться!))",
-                            reply_markup=kb_gallery(team_shown=True))
+        await cb.message.answer(
+            "Теперь ты знаешь команду, приятно познакомиться!))",
+            reply_markup=kb_gallery(team_shown=True)
+        )
     await cb.answer()
 
 # ========== PRACTICES ==========
