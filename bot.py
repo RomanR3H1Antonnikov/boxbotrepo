@@ -882,7 +882,6 @@ async def cmd_admin_panel(message: Message):
 @r.callback_query(F.data == CallbackData.MENU.value)
 async def cb_menu(cb: CallbackQuery):
     logger.info(f"Menu callback: user_id={cb.from_user.id}, data={cb.data}")
-    # reset_waiting_flags(ustate(cb.from_user.id))
     await edit_or_send(cb.message, "Выбери действие:", kb_main())
     await cb.answer()
 
@@ -933,6 +932,7 @@ async def cb_gallery(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
+        sess.refresh(user)
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
@@ -1005,6 +1005,7 @@ async def cb_team(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
+        sess.refresh(user)
         if not user:
             await cb.answer("Ошибка", show_alert=True)
             return
@@ -1032,6 +1033,7 @@ async def cb_team(cb: CallbackQuery):
                     await cb.message.answer("Ошибка загрузки видео")
             await cb.message.answer(f"<b>{name}</b>", parse_mode=ParseMode.HTML)
             await asyncio.sleep(0.6)
+        user.team_viewed = True
         sess.commit()
 
         await cb.message.answer(
@@ -1145,10 +1147,9 @@ async def cb_change_contact(cb: CallbackQuery):
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
         )
     else:
-        sess.commit()
         user.awaiting_pvz_address = True
-        sess.refresh(user)
         sess.commit()
+        sess.refresh(user)
         await cb.message.answer(
             "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
@@ -1197,8 +1198,8 @@ async def cb_shipping_cdek(cb: CallbackQuery):
 
     user.pvz_for_order_id = None
     user.awaiting_pvz_address = True
-    sess.refresh(user)
     sess.commit()
+    sess.refresh(user)
 
     await cb.message.answer(
         "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
