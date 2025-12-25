@@ -722,14 +722,13 @@ def kb_cabinet_unauth() -> InlineKeyboardMarkup:
         [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
     ])
 
-def kb_gallery(team_shown: bool = False) -> InlineKeyboardMarkup:
+def kb_gallery() -> InlineKeyboardMarkup:
     buttons = [
         [{"text": "Хочу заказать", "callback_data": CallbackData.CHECKOUT_START.value}],
+        [{"text": "Команда коробочки", "callback_data": CallbackData.TEAM.value}],
         [{"text": "FAQ", "callback_data": CallbackData.FAQ.value}],
         [{"text": "Назад", "callback_data": CallbackData.MENU.value}],
     ]
-    if not team_shown:
-        buttons.insert(1, [{"text": "Команда коробочки", "callback_data": CallbackData.TEAM.value}])
     return create_inline_keyboard(buttons)
 
 def kb_shipping() -> InlineKeyboardMarkup:
@@ -968,7 +967,7 @@ async def cb_gallery(cb: CallbackQuery):
             return
 
         if user.gallery_viewed:
-            await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=user.team_viewed))
+            await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery())
             await cb.answer()
             return
 
@@ -983,7 +982,7 @@ async def cb_gallery(cb: CallbackQuery):
             logger.error(f"Failed to send gallery videos: {e}")
             await cb.message.answer("Ошибка при загрузке видео. Свяжитесь с администратором.")
 
-        await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery(team_shown=user.team_viewed))
+        await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery())
 
         user.gallery_viewed = True
         sess.commit()
@@ -1042,7 +1041,7 @@ async def cb_team(cb: CallbackQuery):
 
         await cb.message.answer(
             "Теперь ты знаешь команду, приятно познакомиться!))",
-            reply_markup=kb_gallery(team_shown=True)
+            reply_markup=kb_gallery()
         )
     await cb.answer()
 
