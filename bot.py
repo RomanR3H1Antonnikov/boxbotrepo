@@ -649,9 +649,11 @@ async def handle_pvz_address(message: Message):
             return
         logger.info(f"handle_pvz_address: user={user.telegram_id}, awaiting={user.awaiting_pvz_address}")
 
-        if getattr(user, "awaiting_pvz_address", False):
+        if user.awaiting_pvz_address:
             address = message.text.strip()
             ok, msg = validate_address(address)
+            user.awaiting_pvz_address = False
+            sess.commit()
             if not ok:
                 await message.answer(f"Ошибка формата адреса: {msg}\nПопробуйте ещё раз (например: Профсоюзная, 93).")
                 return
@@ -1180,13 +1182,15 @@ async def cb_change_contact(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
-    user.awaiting_pvz_address = True
     if cb.data == CallbackData.CHANGE_CONTACT_YES.value:
         await cb.message.answer(
             "Введите новые данные:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
         )
     else:
+        sess.commit()
+        user.awaiting_pvz_address = True
+        sess.commit()
         await cb.message.answer(
             "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
@@ -1228,11 +1232,15 @@ async def cb_shipping_cdek(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
+
     if not user.is_authorized:
         await cb.message.answer("Сначала авторизуйтесь.", reply_markup=kb_cabinet_unauth())
         await cb.answer(); return
+
     user.pvz_for_order_id = None
     user.awaiting_pvz_address = True
+    sess.commit()
+
     await cb.message.answer(
         "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
         reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
