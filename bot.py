@@ -1139,6 +1139,7 @@ async def cb_change_contact(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
+    user.awaiting_pvz_address = True
     if cb.data == CallbackData.CHANGE_CONTACT_YES.value:
         await cb.message.answer(
             "Введите новые данные:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
@@ -1190,7 +1191,7 @@ async def cb_shipping_cdek(cb: CallbackQuery):
         await cb.message.answer("Сначала авторизуйтесь.", reply_markup=kb_cabinet_unauth())
         await cb.answer(); return
     user.pvz_for_order_id = None
-    # user.awaiting_pvz_address = True
+    user.awaiting_pvz_address = True
     await cb.message.answer(
         "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
         reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
@@ -1944,6 +1945,46 @@ async def cb_pvz_confirm(cb: CallbackQuery):
     )
     sess.commit()
     await cb.answer("Готово!")
+
+
+@r.message()  # Ловит текст, когда ждём адрес ПВЗ
+async def handle_pvz_address(message: Message):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, message.from_user.id)
+        if not user:
+            return
+
+        if getattr(user, "awaiting_pvz_address", False):
+            address = message.text.strip()
+            ok, msg = validate_address(address)
+            if not ok:
+                await message.answer(f"Ошибка формата адреса: {msg}\nПопробуйте ещё раз (например: Профсоюзная, 93).")
+                return
+
+            # Сохраняем адрес и ищем ПВЗ
+            user.extra_data["pvz_query"] = address
+            user.awaiting_pvz_address = False
+            sess.commit()
+
+            await message.answer("Ищу ближайшие ПВЗ СДЭК...")
+
+            pvz_list = await find_best_pvz(address, city="Москва")  # или без city
+            if not pvz_list:
+                await message.answer("Не нашёл ПВЗ по этому адресу 😔\nПопробуйте другой или введите код ПВЗ вручную.")
+                return
+
+            user.temp_pvz_list = pvz_list
+            sess.commit()
+
+            await message.answer(
+                f"Нашёл {len(pvz_list)} ПВЗ рядом с «{address}».\nВыбери нужный:",
+                reply_markup=kb_pvz_list(pvz_list)
+            )
+            return
+
+    # Если не ввод адреса — передаём дальше
+    await handle_auth_input(message)
 
 
 @r.message()  # Это ловит ВСЕ текстовые сообщения
