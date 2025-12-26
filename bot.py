@@ -1693,9 +1693,6 @@ async def cb_pvz_select(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
-    try:
-        _, old_code, idx_str = cb.data.split(":")
-        idx = int(idx_str)
 
         if not (0 <= idx < len(user.temp_pvz_list)):
             await cb.answer("Список ПВЗ устарел — введите адрес заново", show_alert=True)
@@ -1703,7 +1700,7 @@ async def cb_pvz_select(cb: CallbackQuery):
 
         pvz = user.temp_pvz_list[idx]
 
-        # Правильно парсим код
+        # Парсим коды
         raw_code = pvz.get("code")
         if isinstance(raw_code, str) and raw_code.startswith("MSK"):
             real_code = int(raw_code.replace("MSK", ""))
@@ -1718,21 +1715,23 @@ async def cb_pvz_select(cb: CallbackQuery):
             await cb.answer("Ошибка кода ПВЗ", show_alert=True)
             return
 
-        logger.info(f"PVZ выбран: {pvz['location']['address_full']} → код: {real_code}")
+        # city_code — с fallback!
+        city_code = pvz.get("location", {}).get("code") or Config.CDEK_FROM_CITY_CODE
+        city_code = str(city_code)
 
         full_address = pvz["location"]["address_full"]
         work_time = pvz.get("work_time") or "Пн–Пт 10:00–20:00, Сб–Вс 10:00–18:00"
 
-        # Сохраняем выбранный ПВЗ
+        # Сохраняем выбранный ПВЗ в БД
         user.temp_selected_pvz = {
             "code": real_code,
+            "city_code": city_code,
             "address": full_address,
             "work_time": work_time
         }
 
-        # Считаем доставку
-        await cb.message.answer("Считаю стоимость доставки…")
-        delivery_info = await calculate_cdek_delivery_cost(str(real_code))
+        # Расчёт доставки
+        delivery_info = await calculate_cdek_delivery_cost(city_code)
 
         delivery_cost = delivery_info["cost"] if delivery_info else 590
         period_text = "3–7"
@@ -1744,61 +1743,59 @@ async def cb_pvz_select(cb: CallbackQuery):
         total = Config.PRICE_RUB + delivery_cost
         prepay = (total * Config.PREPAY_PERCENT + 99) // 100
 
-        # ←←← СОЗДАЁМ ЗАКАЗ СРАЗУ ЗДЕСЬ ←←←
-        engine = make_engine(Config.DB_PATH)
-        with Session(engine) as sess:
-            order = create_order_db(
-                sess,
-                user_id=cb.from_user.id,
-                product_id=1,  # ID коробочки "anxiety" из БД
-                status=OrderStatus.NEW.value,
-                shipping_method="cdek_pvz",
-                address=full_address,
-                total_price_kop=(total * 100),  # в копейках!
-                delivery_cost_kop=(delivery_cost * 100),
-                extra_data={
-                    "pvz_code": real_code,
-                    "delivery_cost": delivery_cost,
-                    "delivery_period": period_text,
-                }
-            )
-            order.id = order.id
-            sess.commit()
-
-        # ←←← ВАЖНО: используем правильные callback_data! ←←←
-        await edit_or_send(
-            cb.message,
-            f"<b>ПВЗ сохранён!</b>\n\n"
-            f"{full_address}\n"
-            f"Режим работы: {work_time}\n\n"
-            f"Доставка: <b>{delivery_cost} ₽</b>\n"
-            f"Срок: <b>≈ {period_text} дн.</b>\n\n"
-            f"<b>Итого: {total} ₽</b>\n"
-            f"• Предоплата 30% = {prepay} ₽\n"
-            f"• Остаток = {total - prepay} ₽",
-            create_inline_keyboard([
-                [{"text": f"Оплатить 100% ({total} ₽)", "callback_data": f"pay:full:{order.id}"}],
-                [{"text": f"Предоплата 30% ({prepay} ₽)", "callback_data": f"pay:pre:{order.id}"}],
-                [{"text": "Выбрать другой ПВЗ", "callback_data": "pvz_backlist"}],
-                [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
-            ])
+        # Создаём заказ
+        order = create_order_db(
+            sess,
+            user_id=cb.from_user.id,
+            product_id=1,
+            status=OrderStatus.NEW.value,
+            shipping_method="cdek_pvz",
+            address=full_address,
+            total_price_kop=(total * 100),
+            delivery_cost_kop=(delivery_cost * 100),
+            extra_data={
+                "pvz_code": real_code,
+                "city_code": city_code,
+                "delivery_cost": delivery_cost,
+                "delivery_period": period_text,
+            }
         )
-        await cb.answer("Готово!")
+        order_id = order.id
 
+        # Важно: сохраняем флаг для подарочного сообщения
         user.awaiting_gift_message = True
-        await cb.message.answer(
-            "Хотите добавить личное послание в подарок получателю?\n(Текст будет вложен в коробочку)",
-            reply_markup=create_inline_keyboard([
-                [{"text": "Да, добавить", "callback_data": "gift:yes"}],
-                [{"text": "Нет, без послания", "callback_data": "gift:no"}],
-                [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
-            ])
-        )
 
-    except Exception as e:
-        logger.error(f"cb_pvz_select error: {e}", exc_info=True)
-        await cb.answer("Ошибка", show_alert=True)
+        sess.commit()  # ← всё сохраняется: и заказ, и user.temp_selected_pvz, и awaiting_gift_message
 
+    # ← здесь уже можно использовать order_id и локальные переменные
+    await edit_or_send(
+        cb.message,
+        f"<b>ПВЗ сохранён!</b>\n\n"
+        f"{full_address}\n"
+        f"Режим работы: {work_time}\n\n"
+        f"Доставка: <b>{delivery_cost} ₽</b>\n"
+        f"Срок: <b>≈ {period_text} дн.</b>\n\n"
+        f"<b>Итого: {total} ₽</b>\n"
+        f"• Предоплата 30% = {prepay} ₽\n"
+        f"• Остаток = {total - prepay} ₽",
+        create_inline_keyboard([
+            [{"text": f"Оплатить 100% ({total} ₽)", "callback_data": f"pay:full:{order_id}"}],
+            [{"text": f"Предоплата 30% ({prepay} ₽)", "callback_data": f"pay:pre:{order_id}"}],
+            [{"text": "Выбрать другой ПВЗ", "callback_data": "pvz_backlist"}],
+            [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
+        ])
+    )
+    await cb.answer("Готово!")
+
+    await cb.message.answer(
+        "Хотите добавить личное послание в подарок получателю?\n(Текст будет вложен в коробочку)",
+        reply_markup=create_inline_keyboard([
+            [{"text": "Да, добавить", "callback_data": "gift:yes"}],
+            [{"text": "Нет, без послания", "callback_data": "gift:no"}],
+            [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
+        ])
+    )
+    
 
 @r.callback_query(F.data.startswith("gift:"))
 async def cb_gift_message(cb: CallbackQuery):
