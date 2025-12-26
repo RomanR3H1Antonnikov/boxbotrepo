@@ -2545,7 +2545,7 @@ async def main():
         seed_data(sess, anxiety_codes=None)
         sess.commit()
 
-    await asyncio.sleep(10)
+    await asyncio.sleep(15)
     asyncio.create_task(check_all_shipped_orders())
 
     while True:
