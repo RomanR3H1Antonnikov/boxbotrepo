@@ -1697,13 +1697,16 @@ async def cb_pvz_backlist(cb: CallbackQuery):
 
 @r.callback_query(lambda c: (c.data or "").startswith("pvz_sel:"))
 async def cb_pvz_select(cb: CallbackQuery):
-
-    # ===== 1. Парсим callback_data =====
+    # ===== 1. БЕЗОПАСНО парсим callback_data =====
     try:
-        _, old_code, idx_str = cb.data.split(":")
+        parts = (cb.data or "").split(":")
+        if len(parts) != 3:
+            await cb.answer("Ошибка выбора ПВЗ", show_alert=True)
+            return
+        _, old_code, idx_str = parts
         idx = int(idx_str)
-    except Exception:
-        await cb.answer("Ошибка выбора ПВЗ", show_alert=True)
+    except (ValueError, IndexError):
+        await cb.answer("Ошибка выбора ПВЗ - попробуйте заново", show_alert=True)
         return
 
     engine = make_engine(Config.DB_PATH)
@@ -1723,12 +1726,13 @@ async def cb_pvz_select(cb: CallbackQuery):
         pvz = user.temp_pvz_list[idx]
 
         # ===== 4. Защита от устаревших кнопок =====
-        if str(pvz.get("code")) != str(old_code):
-            await cb.answer("Список ПВЗ устарел — выберите заново", show_alert=True)
+        current_code = pvz.get("code")
+        if str(current_code) != str(old_code):
+            await cb.answer("Эта кнопка устарела — выберите ПВЗ заново", show_alert=True)
             return
 
-        # ===== 5. Защита от повторного нажатия =====
-        if user.pvz_for_order_id:
+        # ===== 5. Защита от повторного выбора =====
+        if getattr(user, "pvz_for_order_id", None):
             await cb.answer("ПВЗ уже выбран. Продолжайте оформление.", show_alert=True)
             return
 
@@ -1741,28 +1745,26 @@ async def cb_pvz_select(cb: CallbackQuery):
         elif isinstance(raw_code, str):
             real_code = int("".join(filter(str.isdigit, raw_code)))
         else:
-            real_code = 0
-
-        if real_code == 0:
             await cb.answer("Ошибка кода ПВЗ", show_alert=True)
             return
 
-        # ===== 7. city_code (код города, НЕ ПВЗ) =====
+        # ===== 7. city_code с fallback =====
         city_code = pvz.get("location", {}).get("code") or Config.CDEK_FROM_CITY_CODE
         city_code = str(city_code)
 
         full_address = pvz["location"]["address_full"]
         work_time = pvz.get("work_time") or "Пн–Пт 10:00–20:00, Сб–Вс 10:00–18:00"
 
-        # ===== 8. Сохраняем выбранный ПВЗ пользователю =====
+        # ===== 8. Сохраняем выбранный ПВЗ =====
         user.temp_selected_pvz = {
-            "code": real_code,          # код ПВЗ (126)
-            "city_code": city_code,     # код города (44)
+            "code": real_code,
+            "city_code": city_code,
             "address": full_address,
             "work_time": work_time
         }
 
         # ===== 9. Считаем доставку =====
+        await cb.message.answer("Считаю стоимость доставки…")
         delivery_info = await calculate_cdek_delivery_cost(city_code)
 
         delivery_cost = delivery_info["cost"] if delivery_info else 590
@@ -1795,14 +1797,13 @@ async def cb_pvz_select(cb: CallbackQuery):
 
         order_id = order.id
 
-        # ===== 11. Фиксируем заказ у пользователя =====
+        # ===== 11. Фиксируем, что заказ начат =====
         user.pvz_for_order_id = order_id
         user.awaiting_gift_message = True
 
-        # ===== 12. Коммит ВСЕГО =====
         sess.commit()
 
-    # ===== 13. UI — после выхода из сессии =====
+    # ===== 12. UI =====
     await edit_or_send(
         cb.message,
         f"<b>ПВЗ сохранён!</b>\n\n"
@@ -1824,8 +1825,7 @@ async def cb_pvz_select(cb: CallbackQuery):
     await cb.answer("Готово!")
 
     await cb.message.answer(
-        "Хотите добавить личное послание в подарок получателю?\n"
-        "(Текст будет вложен в коробочку)",
+        "Хотите добавить личное послание в подарок получателю?\n(Текст будет вложен в коробочку)",
         reply_markup=create_inline_keyboard([
             [{"text": "Да, добавить", "callback_data": "gift:yes"}],
             [{"text": "Нет, без послания", "callback_data": "gift:no"}],
