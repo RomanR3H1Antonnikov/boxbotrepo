@@ -1287,6 +1287,8 @@ async def cb_pay(cb: CallbackQuery):
     async with lock:
         try:
             engine = make_engine(Config.DB_PATH)
+            need_cdek_create = False
+
             with Session(engine) as sess:
                 order = sess.get(Order, oid)
 
@@ -1294,7 +1296,6 @@ async def cb_pay(cb: CallbackQuery):
                     await cb.answer("Заказ не найден", show_alert=True)
                     return
 
-                # ===== ЗАЩИТА ОТ ПОВТОРНОЙ ОПЛАТЫ =====
                 if order.status in (
                     OrderStatus.PAID.value,
                     OrderStatus.SHIPPED.value,
@@ -1303,102 +1304,90 @@ async def cb_pay(cb: CallbackQuery):
                     await cb.answer("Этот заказ уже оплачен", show_alert=True)
                     return
 
-                # ===== ГАРАНТИЯ ЦЕНЫ =====
+                # Гарантия цены
                 if order.total_price == 0:
-                    delivery_cost = order.extra_data.get("delivery_cost", 590)
-                    order.total_price = Config.PRICE_RUB + delivery_cost
+                    delivery_cost = (order.extra_data or {}).get("delivery_cost", 590)
+                    total = Config.PRICE_RUB + delivery_cost
+                    order.total_price = total * 100
+                    prepay = (total * Config.PREPAY_PERCENT + 99) // 100
+                    order.prepay_amount = prepay * 100
+                    order.remainder_amount = (total - prepay) * 100
 
-                # =================== FULL ===================
                 if kind == "full":
-                    if order.status not in (
-                        OrderStatus.NEW.value,
-                        OrderStatus.PREPAID.value,
-                        OrderStatus.READY.value
-                    ):
+                    if order.status not in (OrderStatus.NEW.value, OrderStatus.PREPAID.value, OrderStatus.READY.value):
                         await cb.answer("Нельзя оплатить этот заказ", show_alert=True)
                         return
 
                     order.payment_kind = "full"
                     order.status = OrderStatus.PAID.value
-                    sess.commit()
+                    need_cdek_create = True
 
-                    await notify_admins_payment_success(order)
-
-                    await cb.message.answer(
-                        "Полная оплата получена! ❤️\n\n"
-                        f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
-                        reply_markup=kb_order_status(order)
-                    )
-
-            # ⚠️ ВАЖНО: дальше мы ВНЕ Session
-            success = await create_cdek_order(oid)
-
-            if success:
-                await notify_admins_order_shipped(order)
-            else:
-                with Session(engine) as sess:
-                    order = sess.get(Order, oid)
-                    order.status = OrderStatus.READY.value
-                    sess.commit()
-                await notify_admin(
-                    f"⚠️ СДЭК не принял заказ #{oid}, требуется внимание"
-                )
-
-            # =================== PREPAY ===================
-            if kind == "pre":
-                with Session(engine) as sess:
-                    order = sess.get(Order, oid)
+                elif kind == "pre":
                     if order.status != OrderStatus.NEW.value:
                         await cb.answer("Предоплата уже внесена", show_alert=True)
                         return
 
                     order.payment_kind = "pre"
                     order.status = OrderStatus.PREPAID.value
-                    sess.commit()
 
-                await notify_admins_payment_success(order)
-
-                await cb.message.answer(
-                    "Предоплата получена ❤️\n\n"
-                    f"Заказ <b>#{order.id}</b> принят в сборку.",
-                    reply_markup=kb_order_status(order)
-                )
-
-            # =================== REMAINDER ===================
-            if kind == "rem":
-                with Session(engine) as sess:
-                    order = sess.get(Order, oid)
-                    if order.status not in (
-                        OrderStatus.PREPAID.value,
-                        OrderStatus.READY.value
-                    ):
+                elif kind == "rem":
+                    if order.status not in (OrderStatus.PREPAID.value, OrderStatus.READY.value):
                         await cb.answer("Этот заказ нельзя дооплатить", show_alert=True)
                         return
 
                     order.payment_kind = "remainder"
                     order.status = OrderStatus.PAID.value
-                    sess.commit()
+                    need_cdek_create = True
 
-                await notify_admins_payment_remainder(order)
+                else:
+                    await cb.answer("Ошибка типа оплаты", show_alert=True)
+                    return
 
-                await cb.message.answer(
-                    "Дооплата получена ❤️\n\n"
-                    f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
-                    reply_markup=kb_order_status(order)
-                )
+                sess.commit()
 
+                # Уведомления сразу после коммита (order ещё валиден)
+                if kind == "full":
+                    await notify_admins_payment_success(order)
+                    await cb.message.answer(
+                        "Полная оплата получена! ❤️\n\n"
+                        f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
+                        reply_markup=kb_order_status(order)
+                    )
+
+                elif kind == "pre":
+                    await notify_admins_payment_success(order)
+                    await cb.message.answer(
+                        "Предоплата получена ❤️\n\n"
+                        f"Заказ <b>#{order.id}</b> принят в сборку.",
+                        reply_markup=kb_order_status(order)
+                    )
+
+                elif kind == "rem":
+                    await notify_admins_payment_remainder(order)
+                    await cb.message.answer(
+                        "Дооплата получена ❤️\n\n"
+                        f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
+                        reply_markup=kb_order_status(order)
+                    )
+
+            # Создание заказа в СДЭК — ВНЕ сессии
+            if need_cdek_create:
                 success = await create_cdek_order(oid)
 
                 if success:
-                    await notify_admins_order_shipped(order)
-                else:
+                    # Перечитываем свежий заказ для уведомления админу
                     with Session(engine) as sess:
-                        order = sess.get(Order, oid)
-                        order.status = OrderStatus.READY.value
-                        sess.commit()
-                    await notify_admin(
-                        f"⚠️ СДЭК не принял заказ #{oid} после дооплаты"
-                    )
+                        fresh_order = sess.get(Order, oid)
+                        if fresh_order:
+                            await notify_admins_order_shipped(fresh_order)
+                else:
+                    # Откат статуса при ошибке СДЭК
+                    with Session(engine) as sess:
+                        order_rollback = sess.get(Order, oid)
+                        if order_rollback:
+                            order_rollback.status = OrderStatus.READY.value
+                            sess.commit()
+                    await notify_admin(f"⚠️ СДЭК не принял заказ #{oid}, требуется внимание")
 
             await cb.answer()
 
@@ -1893,7 +1882,6 @@ async def cb_gift_message(cb: CallbackQuery):
                     [[{"text": "Отмена", "callback_data": "gift:cancel"}]]
                 )
             )
-
         elif cb.data == "gift:no":
             user.awaiting_gift_message = False
             sess.commit()
@@ -1901,7 +1889,25 @@ async def cb_gift_message(cb: CallbackQuery):
             orders = get_user_orders_db(sess, cb.from_user.id)
             if orders:
                 await show_review(cb.message, orders[-1])
+    await cb.answer()
 
+
+@r.callback_query(F.data == "gift:cancel")
+async def cb_gift_cancel(cb: CallbackQuery):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+
+        user.awaiting_gift_message = False
+        sess.commit()
+
+    await cb.message.answer(
+        "Ок, без послания. Можете переходить к оплате.",
+        reply_markup=kb_main()
+    )
     await cb.answer()
 
 
@@ -2037,63 +2043,51 @@ async def cb_pvz_confirm(cb: CallbackQuery):
 
 
 @r.message()
-async def handle_gift_message(message: Message):
+async def on_message_router(message: Message):
     engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
-        user = get_user_by_id(sess, message.from_user.id)
-        if not user or not user.awaiting_gift_message:
-            return
 
-        text = (message.text or "").strip()
-        if not text:
-            await message.answer("Послание не может быть пустым. Попробуйте ещё раз.")
-            return
-
-        if len(text) > 300:
-            await message.answer("Послание слишком длинное (максимум 300 символов).")
-            return
-
-        # берём последний заказ пользователя
-        orders = get_user_orders_db(sess, user.telegram_id)
-        if not orders:
-            await message.answer("Заказ не найден.")
-            user.awaiting_gift_message = False
-            sess.commit()
-            return
-
-        order = orders[-1]
-
-        order.extra_data["gift_message"] = text
-        user.awaiting_gift_message = False
-
-        sess.commit()
-
-    await message.answer(
-        "💌 Послание сохранено!\n\n"
-        "Теперь можете перейти к оплате.",
-        reply_markup=kb_order_status(order)
-    )
-
-
-@r.message()
-async def handle_pvz_address(message: Message):
-    engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         user = get_user_by_id(sess, message.from_user.id)
         if not user:
             return
 
-        sess.refresh(user)  # Принудительно перечитываем из БД
+        sess.refresh(user)
+        text = (message.text or "").strip()
 
-        logger.info(f"handle_pvz_address: user={user.telegram_id}, awaiting={user.awaiting_pvz_address}")
+        # ===== 1. ПОДАРОЧНОЕ ПОСЛАНИЕ (высший приоритет) =====
+        if user.awaiting_gift_message:
+            if not text:
+                await message.answer("Послание не может быть пустым. Попробуйте ещё раз.")
+                return
+            if len(text) > 300:
+                await message.answer("Послание слишком длинное (максимум 300 символов).")
+                return
 
+            orders = get_user_orders_db(sess, user.telegram_id)
+            if not orders:
+                user.awaiting_gift_message = False
+                sess.commit()
+                await message.answer("Заказ не найден. Попробуйте оформить заказ заново.")
+                return
+
+            order = orders[-1]
+            order.extra_data["gift_message"] = text
+            user.awaiting_gift_message = False
+            sess.commit()
+
+            await message.answer(
+                "💌 Послание сохранено!\n\nТеперь можете перейти к оплате.",
+                reply_markup=kb_order_status(order)
+            )
+            return
+
+        # ===== 2. ВВОД АДРЕСА ПВЗ =====
         if user.awaiting_pvz_address:
-            address = message.text.strip()
-            ok, msg = validate_address(address)
+            ok, msg = validate_address(text)
             if not ok:
                 await message.answer(
                     f"Адрес не распознан: {msg}\n\n"
-                    "Попробуйте ещё раз. Примеры:\n"
+                    "Примеры:\n"
                     "• Профсоюзная, 93\n"
                     "• ул Василисы Кожиной, 14\n"
                     "• Барклая 5А\n"
@@ -2101,43 +2095,32 @@ async def handle_pvz_address(message: Message):
                 )
                 return
 
-            user.extra_data["pvz_query"] = address
+            if not user.extra_data:
+                user.extra_data = {}
+
+            user.extra_data["pvz_query"] = text
             user.awaiting_pvz_address = False
             sess.commit()
 
             await message.answer("Ищу ближайшие ПВЗ СДЭК...")
 
-            pvz_list = await find_best_pvz(address, city="Москва")
+            pvz_list = await find_best_pvz(text, city="Москва")
             if not pvz_list:
-                await message.answer("Не нашёл ПВЗ.\nПопробуйте другой адрес.")
+                await message.answer("Не нашёл ПВЗ. Попробуйте другой адрес.")
                 return
 
             user.temp_pvz_list = pvz_list
             sess.commit()
 
             await message.answer(
-                f"Нашёл {len(pvz_list)} ПВЗ рядом с «{address}».\nВыбери нужный:",
+                f"Нашёл {len(pvz_list)} ПВЗ рядом с «{text}».\nВыбери нужный:",
                 reply_markup=kb_pvz_list(pvz_list)
             )
             return
 
-    # Если не ввод адреса — передаём дальше
-    await handle_auth_input(message)
-
-
-@r.message()  # Это ловит ВСЕ текстовые сообщения
-async def handle_auth_input(message: Message):
-    # Проверяем, ожидает ли пользователь ввода данных (по наличию записи в БД)
-    engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
-        user = get_user_by_id(sess, message.from_user.id)
-        if not user:
-            return
-
-        # Если пользователь ещё не авторизован — пытаемся обработать ввод
+        # ===== 3. АВТОРИЗАЦИЯ =====
         if not user.is_authorized:
-            text = message.text.strip()
-            lines = [line.strip() for line in text.split("\n") if line.strip()]
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
 
             if len(lines) == 3:
                 full_name, phone, email = lines
@@ -2156,20 +2139,21 @@ async def handle_auth_input(message: Message):
                     )
                     return
                 else:
-                    await message.answer(f"Ошибка: {msg}\nПопробуйте ещё раз.", reply_markup=kb_main())
+                    await message.answer(f"Ошибка: {msg}")
                     return
-            else:
-                # Если не 3 строки — просто напомним формат
-                await message.answer(
-                    "Введите данные в 3 строки:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com"
-                )
-                return
 
-    # Если не авторизация — передаём дальше в общий обработчик
+            await message.answer(
+                "Введите данные в 3 строки:\n"
+                "Имя Фамилия\n"
+                "+7XXXXXXXXXX\n"
+                "email@example.com"
+            )
+            return
+
+    # ===== 4. ОБЫЧНЫЙ ТЕКСТ / ФОЛЛБЕК =====
     await on_text(message)
 
 
-@r.message()
 async def on_text(message: Message):
     text = (message.text or "").strip().lower()
 
