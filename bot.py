@@ -2037,6 +2037,45 @@ async def cb_pvz_confirm(cb: CallbackQuery):
 
 
 @r.message()
+async def handle_gift_message(message: Message):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, message.from_user.id)
+        if not user or not user.awaiting_gift_message:
+            return
+
+        text = (message.text or "").strip()
+        if not text:
+            await message.answer("Послание не может быть пустым. Попробуйте ещё раз.")
+            return
+
+        if len(text) > 300:
+            await message.answer("Послание слишком длинное (максимум 300 символов).")
+            return
+
+        # берём последний заказ пользователя
+        orders = get_user_orders_db(sess, user.telegram_id)
+        if not orders:
+            await message.answer("Заказ не найден.")
+            user.awaiting_gift_message = False
+            sess.commit()
+            return
+
+        order = orders[-1]
+
+        order.extra_data["gift_message"] = text
+        user.awaiting_gift_message = False
+
+        sess.commit()
+
+    await message.answer(
+        "💌 Послание сохранено!\n\n"
+        "Теперь можете перейти к оплате.",
+        reply_markup=kb_order_status(order)
+    )
+
+
+@r.message()
 async def handle_pvz_address(message: Message):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
@@ -2084,45 +2123,6 @@ async def handle_pvz_address(message: Message):
 
     # Если не ввод адреса — передаём дальше
     await handle_auth_input(message)
-
-
-@r.message()
-async def handle_gift_message(message: Message):
-    engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
-        user = get_user_by_id(sess, message.from_user.id)
-        if not user or not user.awaiting_gift_message:
-            return
-
-        text = (message.text or "").strip()
-        if not text:
-            await message.answer("Послание не может быть пустым. Попробуйте ещё раз.")
-            return
-
-        if len(text) > 300:
-            await message.answer("Послание слишком длинное (максимум 300 символов).")
-            return
-
-        # берём последний заказ пользователя
-        orders = get_user_orders_db(sess, user.telegram_id)
-        if not orders:
-            await message.answer("Заказ не найден.")
-            user.awaiting_gift_message = False
-            sess.commit()
-            return
-
-        order = orders[-1]
-
-        order.extra_data["gift_message"] = text
-        user.awaiting_gift_message = False
-
-        sess.commit()
-
-    await message.answer(
-        "💌 Послание сохранено!\n\n"
-        "Теперь можете перейти к оплате.",
-        reply_markup=kb_order_status(order)
-    )
 
 
 @r.message()  # Это ловит ВСЕ текстовые сообщения
