@@ -1723,7 +1723,6 @@ async def cb_pvz_backlist(cb: CallbackQuery):
     await cb.answer()
 
 
-
 @r.callback_query(lambda c: (c.data or "").startswith("pvz_sel:"))
 async def cb_pvz_select(cb: CallbackQuery):
     # ===== 1. БЕЗОПАСНО парсим callback_data =====
@@ -1828,7 +1827,8 @@ async def cb_pvz_select(cb: CallbackQuery):
 
         # ===== 11. Фиксируем, что заказ начат =====
         user.pvz_for_order_id = order_id
-        user.awaiting_gift_message = True
+        user.awaiting_gift_message = False
+        user.temp_gift_order_id = None
 
         sess.commit()
 
@@ -1840,15 +1840,7 @@ async def cb_pvz_select(cb: CallbackQuery):
         f"Режим работы: {work_time}\n\n"
         f"Доставка: <b>{delivery_cost} ₽</b>\n"
         f"Срок: <b>≈ {period_text} дн.</b>\n\n"
-        f"<b>Итого: {total} ₽</b>\n"
-        f"• Предоплата 30% = {prepay} ₽\n"
-        f"• Остаток = {total - prepay} ₽",
-        create_inline_keyboard([
-            [{"text": f"Оплатить 100% ({total} ₽)", "callback_data": f"pay:full:{order_id}"}],
-            [{"text": f"Предоплата 30% ({prepay} ₽)", "callback_data": f"pay:pre:{order_id}"}],
-            [{"text": "Выбрать другой ПВЗ", "callback_data": "pvz_backlist"}],
-            [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
-        ])
+        f"<b>Итого: {total} ₽</b>"
     )
 
     await cb.answer("Готово!")
@@ -1863,8 +1855,8 @@ async def cb_pvz_select(cb: CallbackQuery):
     )
 
 
-@r.callback_query(F.data.startswith("gift:"))
-async def cb_gift_message(cb: CallbackQuery):
+@r.callback_query(F.data == "gift:yes")
+async def cb_gift_yes(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
@@ -1872,24 +1864,87 @@ async def cb_gift_message(cb: CallbackQuery):
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-        if cb.data == "gift:yes":
-            user.awaiting_gift_message = True
-            sess.commit()
+        orders = get_user_orders_db(sess, cb.from_user.id)
+        order = orders[-1] if orders else None
 
-            await cb.message.answer(
-                "Напишите текст послания (до 300 символов):",
-                reply_markup=create_inline_keyboard(
-                    [[{"text": "Отмена", "callback_data": "gift:cancel"}]]
-                )
-            )
-        elif cb.data == "gift:no":
+        # === ЗАЩИТА: нет активного заказа ===
+        if not order or order.status not in (
+            OrderStatus.NEW.value,
+            OrderStatus.PREPAID.value
+        ):
             user.awaiting_gift_message = False
+            user.temp_gift_order_id = None
             sess.commit()
 
-            orders = get_user_orders_db(sess, cb.from_user.id)
-            if orders:
-                await show_review(cb.message, orders[-1])
+            await cb.answer("Нет активного заказа", show_alert=True)
+            await cb.message.answer(
+                "Чтобы добавить послание, сначала оформите заказ.",
+                reply_markup=kb_main()
+            )
+            return
+
+        # === ЗАЩИТА ОТ ПОВТОРНОГО НАЖАТИЯ ===
+        if user.awaiting_gift_message:
+            await cb.answer("Вы уже вводите послание", show_alert=True)
+            return
+
+        # === ФИКСИРУЕМ КОНКРЕТНЫЙ ЗАКАЗ ===
+        user.awaiting_gift_message = True
+        user.temp_gift_order_id = order.id
+        sess.commit()
+
+    await cb.message.answer(
+        "Напишите текст послания (до 300 символов):",
+        reply_markup=create_inline_keyboard([
+            [{"text": "Отмена", "callback_data": "gift:cancel"}]
+        ])
+    )
     await cb.answer()
+
+
+@r.callback_query(F.data == "gift:no")
+async def cb_gift_no(cb: CallbackQuery):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+
+        order_id = user.temp_gift_order_id
+        if not order_id:
+            await cb.answer("Заказ не найден", show_alert=True)
+            return
+
+        order = sess.get(Order, order_id)
+        if not order:
+            await cb.answer("Заказ не найден", show_alert=True)
+            return
+
+        # закрываем состояние
+        user.awaiting_gift_message = False
+        user.temp_gift_order_id = None
+        sess.commit()
+
+    await send_payment_keyboard(cb.message, order)
+    await cb.answer()
+
+
+async def send_payment_keyboard(msg: Message, order):
+    total = order.total_price_kop // 100
+    prepay = (total * Config.PREPAY_PERCENT + 99) // 100
+
+    await msg.answer(
+        f"<b>Оплата заказа #{order.id}</b>\n\n"
+        f"Итого: <b>{total} ₽</b>\n"
+        f"• Предоплата 30% = {prepay} ₽\n"
+        f"• Остаток = {total - prepay} ₽",
+        reply_markup=create_inline_keyboard([
+            [{"text": f"Оплатить 100% ({total} ₽)", "callback_data": f"pay:full:{order.id}"}],
+            [{"text": f"Предоплата 30% ({prepay} ₽)", "callback_data": f"pay:pre:{order.id}"}],
+            [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
+        ])
+    )
 
 
 @r.callback_query(F.data == "gift:cancel")
@@ -1902,6 +1957,7 @@ async def cb_gift_cancel(cb: CallbackQuery):
             return
 
         user.awaiting_gift_message = False
+        user.temp_gift_order_id = None
         sess.commit()
 
     await cb.message.answer(
@@ -1909,6 +1965,7 @@ async def cb_gift_cancel(cb: CallbackQuery):
         reply_markup=kb_main()
     )
     await cb.answer()
+
 
 
 
@@ -2054,31 +2111,52 @@ async def on_message_router(message: Message):
         sess.refresh(user)
         text = (message.text or "").strip()
 
-        # ===== 1. ПОДАРОЧНОЕ ПОСЛАНИЕ (высший приоритет) =====
+        # ===== 1. ПОДАРОЧНОЕ ПОСЛАНИЕ =====
         if user.awaiting_gift_message:
-            if not text:
-                await message.answer("Послание не может быть пустым. Попробуйте ещё раз.")
-                return
-            if len(text) > 300:
-                await message.answer("Послание слишком длинное (максимум 300 символов).")
-                return
+            order_id = user.temp_gift_order_id
 
-            orders = get_user_orders_db(sess, user.telegram_id)
-            if not orders:
+            if not order_id:
                 user.awaiting_gift_message = False
                 sess.commit()
-                await message.answer("Заказ не найден. Попробуйте оформить заказ заново.")
+                await message.answer(
+                    "Послание больше нельзя добавить.",
+                    reply_markup=kb_main()
+                )
                 return
 
-            order = orders[-1]
+            order = sess.get(Order, order_id)
+
+            # === ЗАЩИТА: заказ исчез / неактивен ===
+            if not order or order.user_id != user.telegram_id or order.status not in (
+                    OrderStatus.NEW.value,
+                    OrderStatus.PREPAID.value
+            ):
+                user.awaiting_gift_message = False
+                user.temp_gift_order_id = None
+                sess.commit()
+
+                await message.answer(
+                    "Послание больше нельзя добавить — заказ недоступен.",
+                    reply_markup=kb_main()
+                )
+                return
+
+            if not text:
+                await message.answer("Послание не может быть пустым.")
+                return
+
+            if len(text) > 300:
+                await message.answer("Максимум 300 символов.")
+                return
+
+            # === СОХРАНЯЕМ ===
             order.extra_data["gift_message"] = text
             user.awaiting_gift_message = False
+            user.temp_gift_order_id = None
             sess.commit()
 
-            await message.answer(
-                "💌 Послание сохранено!\n\nТеперь можете перейти к оплате.",
-                reply_markup=kb_order_status(order)
-            )
+            await message.answer("💌 Послание сохранено!")
+            await send_payment_keyboard(message, order)
             return
 
         # ===== 2. ВВОД АДРЕСА ПВЗ =====
