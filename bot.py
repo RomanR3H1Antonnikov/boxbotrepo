@@ -1165,7 +1165,6 @@ async def cb_checkout_start(cb: CallbackQuery):
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-        # СБРОС СОСТОЯНИЙ ПРЕДЫДУЩЕГО ЗАКАЗА
         user.pvz_for_order_id = None
         user.temp_selected_pvz = None
         user.temp_pvz_list = None
@@ -1173,17 +1172,17 @@ async def cb_checkout_start(cb: CallbackQuery):
 
         sess.commit()
 
-    if user.is_authorized:
-        await cb.message.answer(
-            f"Проверьте данные:\n• ФИО: {user.full_name}\n• Телефон: {user.phone}\n• Email: {user.email}\n\nХотите изменить?",
-            reply_markup=kb_change_contact()
-        )
-    else:
-        await cb.message.answer(
-            "Введите данные в 3 строки:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
-            reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.MENU.value}]])
-        )
-    sess.commit()
+        if user.is_authorized:
+            await cb.message.answer(
+                f"Проверьте данные:\n• ФИО: {user.full_name}\n• Телефон: {user.phone}\n• Email: {user.email}\n\nХотите изменить?",
+                reply_markup=kb_change_contact()
+            )
+        else:
+            await cb.message.answer(
+                "Введите данные в 3 строки:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
+                reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.MENU.value}]])
+            )
+
     await cb.answer()
 
 @r.callback_query(F.data.startswith("change_contact:"))
