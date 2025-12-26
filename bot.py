@@ -361,52 +361,65 @@ dp.include_router(r)
 CODE_RE = re.compile(r"^\d{4}$")
 
 
-async def create_cdek_order(order: Order) -> bool:
+async def create_cdek_order(order_id: int) -> bool:
     token = await get_cdek_token()
     if not token:
         logger.error("Нет токена СДЭК")
         return False
 
-    pvz_code = order.extra_data.get("pvz_code")
-    if not pvz_code:
-        logger.error(f"Нет pvz_code для заказа #{order.id}")
-        return False
-
     engine = make_engine(Config.DB_PATH)
+
+    # ================== 1. Загружаем заказ и пользователя ==================
     with Session(engine) as sess:
-        u = get_user_by_id(sess, order.user_id)
-        if not u or not u.full_name or not u.phone:
+        order = sess.get(Order, order_id)
+        if not order:
+            logger.error(f"Заказ #{order_id} не найден")
+            return False
+
+        pvz_code = order.extra_data.get("pvz_code")
+        if not pvz_code:
+            logger.error(f"Нет pvz_code для заказа #{order.id}")
+            return False
+
+        user = get_user_by_id(sess, order.user_id)
+        if not user or not user.full_name or not user.phone:
             logger.error(f"Нет данных пользователя для заказа #{order.id}")
             return False
 
+        address = order.address or "ПВЗ СДЭК"
+        postal_code = order.extra_data.get("postal_code", "000000")
+
+    # ================== 2. Формируем payload ==================
     payload = {
         "type": 2,
-        "number": f"BOX{order.id}",
+        "number": f"BOX{order_id}",
         "tariff_code": 136,
-        "comment": f"Заказ из бота «ТВОЯ КОРОБОЧКА» #{order.id}",
+        "comment": f"Заказ из бота «ТВОЯ КОРОБОЧКА» #{order_id}",
         "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE,
 
         "delivery_recipient_cost": {"value": 0},
 
         "to_location": {
             "code": str(pvz_code),
-            "address": order.address or "г. Москва, ПВЗ СДЭК",
-            "postal_code": "121096"
+            "address": address,
+            "postal_code": postal_code,
         },
 
         "sender": {
             "company": "ИП Романов Р. А.",
             "name": "Роман",
-            "phones": [{"number": "+79999999999"}]
+            "phones": [{"number": "+79999999999"}],
         },
 
         "recipient": {
-            "name": u.full_name,
-            "phones": [{"number": u.phone.replace("+","").replace(" ","").replace("-","")}]
+            "name": user.full_name,
+            "phones": [{
+                "number": user.phone.replace("+", "").replace(" ", "").replace("-", "")
+            }],
         },
 
         "packages": [{
-            "number": f"BOX{order.id}",
+            "number": f"BOX{order_id}",
             "weight": Config.PACKAGE_WEIGHT_G,
             "length": Config.PACKAGE_LENGTH_CM,
             "width": Config.PACKAGE_WIDTH_CM,
@@ -414,70 +427,85 @@ async def create_cdek_order(order: Order) -> bool:
             "comment": "Подарочная коробочка с антистресс-набором",
             "items": [{
                 "name": "Коробочка «Отпусти тревогу»",
-                "ware_key": f"BOX{order.id}",
+                "ware_key": f"BOX{order_id}",
                 "payment": {"value": 0},
                 "cost": Config.PRICE_RUB,
                 "weight": Config.PACKAGE_WEIGHT_G,
-                "amount": 1
-            }]
+                "amount": 1,
+            }],
         }],
 
         "services": [
-            {"code": "INSURANCE", "parameter": Config.PRICE_RUB + 590}
-        ]
+            {"code": "INSURANCE", "parameter": Config.PRICE_RUB}
+        ],
     }
 
-
     import json
-    pretty_payload = json.dumps(payload, ensure_ascii=False, indent=2)
-    logger.info(f"\n\n=== ОТПРАВЛЯЕМ В СДЭК ЗАКАЗ #{order.id} ===\n{pretty_payload}\n{'='*50}")
+    logger.info(
+        f"\n=== ОТПРАВЛЯЕМ В СДЭК ЗАКАЗ #{order_id} ===\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
+        f"{'=' * 50}"
+    )
 
     headers = {
         "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
     url = "https://api.edu.cdek.ru/v2/orders"
 
+    # ================== 3. HTTP-запрос ==================
     try:
-        r = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=30)
+        r = await asyncio.to_thread(
+            requests.post,
+            url,
+            json=payload,
+            headers=headers,
+            timeout=30,
+        )
+
         logger.info(f"СДЭК ответил: {r.status_code}\n{r.text[:2000]}")
 
-        # 200 / 201 — обычный успех (прод), 202 — асинхронный успех на edu.cdek.ru
-        if r.status_code in (200, 201, 202):
-            data = r.json()
+        if r.status_code not in (200, 201, 202):
+            await notify_admin(
+                f"❌ СДЭК ошибка для заказа #{order_id}\n"
+                f"{r.status_code}\n{r.text[:1000]}"
+            )
+            return False
 
-            # На edu в ответе 202 uuid лежит прямо в entity.uuid
-            uuid = data.get("entity", {}).get("uuid")
+        data = r.json()
+        uuid = data.get("entity", {}).get("uuid")
 
-            if uuid:
-                order.extra_data["cdek_uuid"] = uuid
-                # На edu трек-номер приходит позже — пока ставим заглушку
-                if uuid:
-                    order.extra_data["cdek_uuid"] = uuid
-                    # Сразу ставим UUID как временный трек — клиент увидит нормальный вид
-                    order.track = uuid
-                    logger.info(f"СДЭК: ЗАКАЗ ПРИНЯТ! UUID: {uuid} → используем как временный трек")
-
-                logger.info(f"СДЭК: ЗАКАЗ ПРИНЯТ! UUID: {uuid} | Заказ #{order.id}")
-                await notify_admin(f"Заказ #{order.id} успешно принят СДЭК (UUID: {uuid})\n"
-                                   f"Трек-номер придёт через 10–90 сек автоматически.")
-
-                # Сразу переводим в SHIPPED — клиент увидит, что всё ок
-                order.status = OrderStatus.SHIPPED.value
-                return True
-            else:
-                logger.error(f"СДЭК вернул {r.status_code}, но без uuid: {data}")
-        else:
-            logger.error(f"СДЭК ОШИБКА #{order.id}: {r.status_code} {r.text}")
-            await notify_admin(f"Ошибка СДЭК #{order.id}\n{r.status_code}\n{r.text[:1000]}")
-
-        return False
+        if not uuid:
+            logger.error(f"СДЭК не вернул uuid для заказа #{order_id}")
+            return False
 
     except Exception as e:
-        logger.exception(f"Исключение при создании заказа СДЭК #{order.id}")
-        await notify_admin(f"Исключение при создании заказа СДЭК #{order.id}: {e}")
+        logger.exception(f"Исключение при создании заказа СДЭК #{order_id}")
+        await notify_admin(f"❌ Исключение при создании заказа СДЭК #{order_id}\n{e}")
         return False
+
+    # ================== 4. СОХРАНЯЕМ UUID В БД ==================
+    with Session(engine) as sess:
+        order = sess.get(Order, order_id)
+        if not order:
+            return False
+
+        order.extra_data["cdek_uuid"] = uuid
+        order.track = uuid  # временно используем UUID как трек
+        order.status = OrderStatus.SHIPPED.value
+        sess.commit()
+
+    logger.info(f"СДЭК: ЗАКАЗ #{order_id} ПРИНЯТ | UUID: {uuid}")
+
+    await notify_admin(
+        f"🚚 Заказ #{order_id} успешно принят СДЭК\n"
+        f"UUID: {uuid}\n"
+        f"Трек-номер придёт автоматически."
+    )
+
+    return True
+
 
 
 def validate_data(full_name: str, phone: str, email: str) -> tuple[bool, str]:
@@ -1294,7 +1322,7 @@ async def cb_pay(cb: CallbackQuery):
                         reply_markup=kb_order_status(order)
                     )
 
-                    success = await create_cdek_order(order)
+                    success = await create_cdek_order(order.id)
                     if success:
                         order.status = OrderStatus.SHIPPED.value
                         sess.commit()
@@ -1376,11 +1404,6 @@ async def cb_pay(cb: CallbackQuery):
 # ========== ORDER STATUS ==========
 @r.callback_query(F.data.startswith("order:"))
 async def cb_order_status(cb: CallbackQuery):
-    def get_order_by_id(order_id: int, user_id: int) -> Order | None:
-        engine = make_engine(Config.DB_PATH)
-        with Session(engine) as sess:
-            stmt = select(Order).where(Order.id == order_id, Order.user_id == user_id)
-            return sess.scalar(stmt)
     try:
         oid = int(cb.data.split(":")[1])
         order = get_order_by_id(oid, cb.from_user.id)
@@ -1620,35 +1643,35 @@ async def cb_admin_set_archived(cb: CallbackQuery):
         await notify_admin(f"❌ Ошибка архивирования заказа #{oid if 'oid' in locals() else 'неизвестный'}")
         await cb.answer("Ошибка", show_alert=True)
 
-    @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_TRACK.value))
-    async def cb_admin_set_track(cb: CallbackQuery):
-        if not await is_admin(cb):
-            await cb.answer("Доступ запрещён", show_alert=True)
+@r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_TRACK.value))
+async def cb_admin_set_track(cb: CallbackQuery):
+    if not await is_admin(cb):
+        await cb.answer("Доступ запрещён", show_alert=True)
+        return
+    try:
+        oid = int(cb.data.split(":")[1])
+        order = get_order_by_id(oid, 0)
+        if not order:
+            await cb.answer("Заказ не найден")
             return
-        try:
-            oid = int(cb.data.split(":")[1])
-            order = get_order_by_id(oid, 0)
-            if not order:
-                await cb.answer("Заказ не найден")
+        # Сохраняем, что админ ждёт трек для этого заказа
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            user = get_user_by_id(sess, cb.from_user.id)
+            if not user:
+                await cb.answer("Ошибка доступа", show_alert=True)
                 return
-            # Сохраняем, что админ ждёт трек для этого заказа
-            engine = make_engine(Config.DB_PATH)
-            with Session(engine) as sess:
-                user = get_user_by_id(sess, cb.from_user.id)
-                if not user:
-                    await cb.answer("Ошибка доступа", show_alert=True)
-                    return
-            user.awaiting_manual_track = True
-            user.temp_order_id_for_track = oid
-            await cb.message.answer(
-                f"Введите трек-номер для заказа #{oid}:",
-                reply_markup=create_inline_keyboard(
-                    [[{"text": "Отмена", "callback_data": CallbackData.ADMIN_PANEL.value}]])
-            )
-            await cb.answer()
-        except Exception as e:
-            logger.error(f"Set track error: {e}")
-            await cb.answer("Ошибка")
+        user.awaiting_manual_track = True
+        user.temp_order_id_for_track = oid
+        await cb.message.answer(
+            f"Введите трек-номер для заказа #{oid}:",
+            reply_markup=create_inline_keyboard(
+                [[{"text": "Отмена", "callback_data": CallbackData.ADMIN_PANEL.value}]])
+        )
+        await cb.answer()
+    except Exception as e:
+        logger.error(f"Set track error: {e}")
+        await cb.answer("Ошибка")
 
 
 @r.callback_query(F.data == "pvz_reenter")
@@ -1659,8 +1682,6 @@ async def cb_pvz_reenter(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
-    # НЕ сбрасываем pvz_for_order_id, чтобы помнить, редактируем ли заказ
-    # user.awaiting_pvz_address = True
     user.awaiting_manual_pvz = False
 
     await cb.message.edit_text(
@@ -1825,14 +1846,13 @@ async def cb_pvz_select(cb: CallbackQuery):
     await cb.answer("Готово!")
 
     await cb.message.answer(
-        "Хотите добавить личное послание в подарок получателю?\n(Текст будет вложен в коробочку)",
+        "Хотите добавить личное послание в подарок получателю?\n"
+        "(Текст будет вложен в коробочку)",
         reply_markup=create_inline_keyboard([
             [{"text": "Да, добавить", "callback_data": "gift:yes"}],
             [{"text": "Нет, без послания", "callback_data": "gift:no"}],
-            [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
         ])
     )
-
 
 
 @r.callback_query(F.data.startswith("gift:"))
@@ -1851,6 +1871,17 @@ async def cb_gift_message(cb: CallbackQuery):
             "Напишите текст послания (до 300 символов):",
             reply_markup=create_inline_keyboard([[{"text": "Отмена", "callback_data": "gift:cancel"}]])
         )
+    elif cb.data == "gift:no":
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            orders = get_user_orders_db(sess, cb.from_user.id)
+            if not orders:
+                await cb.message.answer("Заказ не найден.")
+                return
+
+            order = orders[-1]
+
+        await show_review(cb.message, order)
     else:
         # user.awaiting_gift_message = False
         orders = get_user_orders_db(sess, cb.from_user.id)
@@ -2041,6 +2072,45 @@ async def handle_pvz_address(message: Message):
 
     # Если не ввод адреса — передаём дальше
     await handle_auth_input(message)
+
+
+@r.message()
+async def handle_gift_message(message: Message):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, message.from_user.id)
+        if not user or not user.awaiting_gift_message:
+            return
+
+        text = (message.text or "").strip()
+        if not text:
+            await message.answer("Послание не может быть пустым. Попробуйте ещё раз.")
+            return
+
+        if len(text) > 300:
+            await message.answer("Послание слишком длинное (максимум 300 символов).")
+            return
+
+        # берём последний заказ пользователя
+        orders = get_user_orders_db(sess, user.telegram_id)
+        if not orders:
+            await message.answer("Заказ не найден.")
+            user.awaiting_gift_message = False
+            sess.commit()
+            return
+
+        order = orders[-1]
+
+        order.extra_data["gift_message"] = text
+        user.awaiting_gift_message = False
+
+        sess.commit()
+
+    await message.answer(
+        "💌 Послание сохранено!\n\n"
+        "Теперь можете перейти к оплате.",
+        reply_markup=kb_order_status(order)
+    )
 
 
 @r.message()  # Это ловит ВСЕ текстовые сообщения
@@ -2482,9 +2552,11 @@ async def check_all_shipped_orders():
             orders_to_check = get_all_orders_by_status(OrderStatus.SHIPPED.value)
 
             for order in orders_to_check:
-                uuid = order.extra_data["cdek_uuid"]
-                info = await get_cdek_order_info(uuid)  # лучше полная инфа, а не только статус
+                uuid = order.extra_data.get("cdek_uuid")
+                if not uuid:
+                    continue
 
+                info = await get_cdek_order_info(uuid)
                 if not info:
                     continue
 
@@ -2517,7 +2589,6 @@ async def check_all_shipped_orders():
                     await notify_admin(
                         f"Трек-номер пришёл!\n"
                         f"Заказ #{order.id} → <code>{new_track}</code>\n"
-                        # f"Клиент: {ustate(order.user_id).full_name or 'Неизвестно'}"
                     )
 
                 # === 2. Уведомления об изменении статуса (опционально, только важные) ===
