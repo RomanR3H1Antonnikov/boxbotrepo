@@ -42,6 +42,8 @@ def get_all_orders_by_status(status: str) -> List[Order]:
     with Session(engine) as sess:
         stmt = select(Order).where(Order.status == status)
         return sess.scalars(stmt).all()
+
+
 # ==============DATA=============
 STREET_KEYWORDS = [
     "ул", "ул.", "улица",
@@ -481,11 +483,9 @@ def validate_data(full_name: str, phone: str, email: str) -> tuple[bool, str]:
     return True, "Данные валидны."
 
 def validate_address(address: str) -> tuple[bool, str]:
-    if not address or not address.strip():
-        return False, "Адрес не может быть пустым."
     address = address.strip()
-    if not re.match(r"^[А-Яа-яЁё\s\-.,]+,\s*\d+[\w\s\/.-]*$", address, re.IGNORECASE):
-        return False, "Адрес должен быть в формате: Улица, номер дома\nПримеры:\n• Барклая, 5А\n• Профсоюзная, 93\n• Ленина, 12 к.2"
+    if not address or len(address) < 4:
+        return False, "Адрес слишком короткий. Укажите улицу и номер дома."
     return True, "Адрес валиден."
 
 # ======== ADMIN HELPERS ========
@@ -1972,7 +1972,14 @@ async def handle_pvz_address(message: Message):
             address = message.text.strip()
             ok, msg = validate_address(address)
             if not ok:
-                await message.answer(f"Ошибка формата адреса: {msg}\nПопробуйте ещё раз.")
+                await message.answer(
+                    f"Адрес не распознан: {msg}\n\n"
+                    "Попробуйте ещё раз. Примеры:\n"
+                    "• Профсоюзная, 93\n"
+                    "• ул Василисы Кожиной, 14\n"
+                    "• Барклая 5А\n"
+                    "• Ленинский проспект, д12 к2"
+                )
                 return
 
             user.extra_data["pvz_query"] = address
