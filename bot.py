@@ -3,6 +3,7 @@ import re
 import asyncio
 import logging
 import requests
+from collections import defaultdict
 from typing import Optional, Dict, List
 from enum import Enum
 from sqlalchemy.orm import Session
@@ -29,6 +30,18 @@ from dotenv import load_dotenv
 # ========== CONFIG ==========
 USE_WEBHOOK = False
 load_dotenv()
+
+
+# === PAYMENT LOCKS (защита от повторных нажатий) ===
+_payment_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+def get_payment_lock(order_id: int) -> asyncio.Lock:
+    """
+    Возвращает asyncio.Lock для конкретного заказа.
+    Гарантирует, что оплата обрабатывается строго один раз.
+    """
+    return _payment_locks[order_id]
+
 
 # ============DATABASE===========
 def get_order_by_id(order_id: int, user_id: int) -> Optional[Order]:
@@ -1215,151 +1228,149 @@ async def show_review(msg: Message, order: Order):
 # ========== PAYMENT ==========
 @r.callback_query(F.data.startswith("pay:"))
 async def cb_pay(cb: CallbackQuery):
+    parts = (cb.data or "").split(":")
+    if len(parts) != 3:
+        await cb.answer("Ошибка оплаты", show_alert=True)
+        return
+
+    kind = parts[1]   # full | pre | rem
     try:
-        parts = cb.data.split(":")
-        kind = parts[1]           # "full" | "pre" | "rem"
-        oid_str = parts[2]
-        oid = int(oid_str) if oid_str != "0" else None
+        oid = int(parts[2])
+    except ValueError:
+        await cb.answer("Ошибка заказа", show_alert=True)
+        return
+
+    lock = get_payment_lock(oid)
+
+    if lock.locked():
+        await cb.answer("Оплата уже обрабатывается, подождите…", show_alert=True)
+        return
+
+    async with lock:
         try:
             engine = make_engine(Config.DB_PATH)
             with Session(engine) as sess:
-                user = get_user_by_id(sess, cb.from_user.id)
-                if not user:
-                    await cb.answer("Ошибка доступа", show_alert=True)
+                order = sess.get(Order, oid)
+
+                if not order or order.user_id != cb.from_user.id:
+                    await cb.answer("Заказ не найден", show_alert=True)
                     return
 
-                if not user.is_authorized:
-                    await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
-                    await cb.answer()
+                # ===== ЗАЩИТА ОТ ПОВТОРНОЙ ОПЛАТЫ =====
+                if order.status in (
+                    OrderStatus.PAID.value,
+                    OrderStatus.SHIPPED.value,
+                    OrderStatus.ARCHIVED.value
+                ):
+                    await cb.answer("Этот заказ уже оплачен", show_alert=True)
                     return
 
-                orders = get_user_orders_db(sess, cb.from_user.id)
-                ids = [o.id for o in orders]
+                # ===== ГАРАНТИЯ ЦЕНЫ =====
+                if order.total_price == 0:
+                    delivery_cost = order.extra_data.get("delivery_cost", 590)
+                    order.total_price = Config.PRICE_RUB + delivery_cost
 
-                sess.commit()
+                # ======================================================
+                # =================== FULL PAYMENT =====================
+                # ======================================================
+                if kind == "full":
+                    if order.status not in (
+                        OrderStatus.NEW.value,
+                        OrderStatus.PREPAID.value,
+                        OrderStatus.READY.value
+                    ):
+                        await cb.answer("Нельзя оплатить этот заказ", show_alert=True)
+                        return
+
+                    order.payment_kind = "full"
+                    order.status = OrderStatus.PAID.value
+                    sess.commit()
+
+                    await notify_admins_payment_success(order)
+
+                    await cb.message.answer(
+                        "Полная оплата получена! ❤️\n\n"
+                        f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
+                        reply_markup=kb_order_status(order)
+                    )
+
+                    success = await create_cdek_order(order)
+                    if success:
+                        order.status = OrderStatus.SHIPPED.value
+                        sess.commit()
+                        await notify_admins_order_shipped(order)
+                    else:
+                        order.status = OrderStatus.READY.value
+                        sess.commit()
+                        await notify_admin(
+                            f"⚠️ СДЭК не принял заказ #{order.id}, требуется внимание"
+                        )
+
+                # ======================================================
+                # =================== PREPAY ===========================
+                # ======================================================
+                elif kind == "pre":
+                    if order.status != OrderStatus.NEW.value:
+                        await cb.answer("Предоплата уже внесена", show_alert=True)
+                        return
+
+                    order.payment_kind = "pre"
+                    order.status = OrderStatus.PREPAID.value
+                    sess.commit()
+
+                    await notify_admins_payment_success(order)
+
+                    await cb.message.answer(
+                        "Предоплата получена ❤️\n\n"
+                        f"Заказ <b>#{order.id}</b> принят в сборку.",
+                        reply_markup=kb_order_status(order)
+                    )
+
+                # ======================================================
+                # =================== REMAINDER ========================
+                # ======================================================
+                elif kind == "rem":
+                    if order.status not in (
+                        OrderStatus.PREPAID.value,
+                        OrderStatus.READY.value
+                    ):
+                        await cb.answer("Этот заказ нельзя дооплатить", show_alert=True)
+                        return
+
+                    order.payment_kind = "remainder"
+                    order.status = OrderStatus.PAID.value
+                    sess.commit()
+
+                    await notify_admins_payment_remainder(order)
+
+                    await cb.message.answer(
+                        "Дооплата получена ❤️\n\n"
+                        f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
+                        reply_markup=kb_order_status(order)
+                    )
+
+                    success = await create_cdek_order(order)
+                    if success:
+                        order.status = OrderStatus.SHIPPED.value
+                        sess.commit()
+                        await notify_admins_order_shipped(order)
+                    else:
+                        order.status = OrderStatus.READY.value
+                        sess.commit()
+                        await notify_admin(
+                            f"⚠️ СДЭК не принял заказ #{order.id} после дооплаты"
+                        )
+
+                else:
+                    await cb.answer("Неизвестный тип оплаты", show_alert=True)
+                    return
+
+            await cb.answer()
+
         except Exception as e:
-            logger.error(f"DB error in cb_orders_list: {e}")
-            await cb.answer("Временная ошибка сервера. Попробуйте позже.", show_alert=True)
-            return
-
-        # === 1. Находим или создаём заказ ===
-        if oid:
-            order = get_order_by_id(oid, cb.from_user.id)
-            if not order or order.user_id != cb.from_user.id:
-                await cb.answer("Заказ не найден", show_alert=True)
-                return
-        else:
-            # Новый заказ — только при первой оплате (100% или 30%)
-            if not user.temp_selected_pvz:
-                await cb.answer("Ошибка: ПВЗ не выбран", show_alert=True)
-                return
-            order = user.new_order(cb.from_user.id)
-            order.shipping_method = "cdek_pvz"
-            order.address = user.temp_selected_pvz["address"]
-            order.extra_data.update({
-                "pvz_code": user.temp_selected_pvz["code"],
-                "delivery_cost": user.extra_data.get("delivery_cost", 590),
-                "delivery_period": user.extra_data.get("delivery_period", "3–7"),
-            })
-            user.temp_selected_pvz = None
-
-        # Устанавливаем итоговую цену (один раз)
-        if order.total_price == 0:
-            delivery_cost = order.extra_data.get("delivery_cost", 590)
-            order.total_price = Config.PRICE_RUB + delivery_cost
-
-        # Уведомляем админа о начале оплаты
-        await notify_admins_payment_started(order)
-
-        # ==================================================================
-        # === СЦЕНАРИЙ 1: Полная оплата сразу (100%) =========================
-        # ==================================================================
-        if kind == "full":
-            order.status = OrderStatus.PAID.value
-            order.payment_kind = "full"
-
-            order.status = OrderStatus.READY.value
-            await notify_admins_payment_success(order)
-
-            await cb.message.answer(
-                "Полная оплата получена! Спасибо огромное! ❤️\n\n"
-                f"Заказ <b>#{order.id}</b> уже собирается и скоро будет передан в СДЭК.\n"
-                "Трек-номер пришлю автоматически через 1–2 минуты(либо нажмите кнопку Обновить статус)",
-                reply_markup=kb_order_status(order)
-            )
-
-            # Сразу отправляем в СДЭК
-            success = await create_cdek_order(order)
-            if success:
-                order.status = OrderStatus.SHIPPED.value
-                await notify_admins_order_shipped(order)
-            else:
-                order.status = OrderStatus.READY.value
-                await cb.message.answer(
-                    "Оплата прошла, но временная задержка с СДЭК\n"
-                    "Админ уже в курсе - отправим в ближайшие минуты!",
-                    reply_markup=kb_order_status(order)
-                )
-
-        # ==================================================================
-        # === СЦЕНАРИЙ 2: Предоплата 30% =====================================
-        # ==================================================================
-        elif kind == "pre":
-            order.status = OrderStatus.PREPAID.value
-            order.payment_kind = "pre"
-
-            await notify_admins_payment_success(order)
-
-            await cb.message.answer(
-                "Предоплата получена! Спасибо огромное! ❤️\n\n"
-                f"Заказ <b>#{order.id}</b> принят на сборку.\n"
-                "Как только коробочка будет готова - пришлю ссылку на дооплату остатка и сразу отправлю посылку",
-                reply_markup=kb_order_status(order)
-            )
-
-            # Пока НЕ отправляем в СДЭК — ждём полной оплаты
-
-        # ==================================================================
-        # === СЦЕНАРИЙ 3: Дооплата остатка (после предоплаты) =================
-        # ==================================================================
-        elif kind == "rem":
-            # Защита от случайного нажатия
-            if order.status not in [OrderStatus.PREPAID.value, OrderStatus.READY.value]:
-                await cb.answer("Этот заказ уже полностью оплачен", show_alert=True)
-                return
-
-            order.status = OrderStatus.PAID.value
-            order.payment_kind = "remainder"  # или "full" — как хочешь
-
-            await notify_admins_payment_remainder(order)
-
-            await cb.message.answer(
-                "Полная оплата получена! Спасибо! ❤️\n\n"
-                f"Заказ <b>#{order.id}</b> отправляется в СДЭК прямо сейчас!\n"
-                "Трек-номер пришлю автоматически через 10–90 секунд",
-                reply_markup=kb_order_status(order)
-            )
-
-            # Отправляем в СДЭК немедленно
-            success = await create_cdek_order(order)
-            if success:
-                order.status = OrderStatus.SHIPPED.value
-                await notify_admins_order_shipped(order)
-            else:
-                order.status = OrderStatus.READY.value
-                await cb.message.answer(
-                    "Оплата прошла, но сейчас небольшая задержка с оформлением в СДЭК\n"
-                    "Админ уже в курсе — отправим в течение часа!",
-                    reply_markup=kb_order_status(order)
-                )
-                await notify_admin(f"ВНИМАНИЕ: Заказ #{order.id} — дооплата прошла, но create_cdek_order упал")
-
-        await cb.answer()
-
-    except Exception as e:
-        logger.error(f"Pay error: {e}", exc_info=True)
-        await notify_admin(f"Ошибка в cb_pay: {e}\nДанные: {cb.data}")
-        await cb.answer("Произошла ошибка при оплате", show_alert=True)
+            logger.exception("Ошибка оплаты")
+            await notify_admin(f"❌ Ошибка оплаты #{oid}\n{e}")
+            await cb.answer("Ошибка при оплате", show_alert=True)
 
 
 # ========== ORDER STATUS ==========
@@ -1684,30 +1695,51 @@ async def cb_pvz_backlist(cb: CallbackQuery):
 
 
 
-# === ОБНОВЛЁННЫЙ обработчик выбора ПВЗ ===
 @r.callback_query(lambda c: (c.data or "").startswith("pvz_sel:"))
 async def cb_pvz_select(cb: CallbackQuery):
+
+    # ===== 1. Парсим callback_data =====
+    try:
+        _, old_code, idx_str = cb.data.split(":")
+        idx = int(idx_str)
+    except Exception:
+        await cb.answer("Ошибка выбора ПВЗ", show_alert=True)
+        return
+
     engine = make_engine(Config.DB_PATH)
+
     with Session(engine) as sess:
+        # ===== 2. Загружаем пользователя =====
         user = get_user_by_id(sess, cb.from_user.id)
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-        if not (0 <= idx < len(user.temp_pvz_list)):
+        # ===== 3. Проверка списка ПВЗ =====
+        if not user.temp_pvz_list or not (0 <= idx < len(user.temp_pvz_list)):
             await cb.answer("Список ПВЗ устарел — введите адрес заново", show_alert=True)
             return
 
         pvz = user.temp_pvz_list[idx]
 
-        # Парсим коды
+        # ===== 4. Защита от устаревших кнопок =====
+        if str(pvz.get("code")) != str(old_code):
+            await cb.answer("Список ПВЗ устарел — выберите заново", show_alert=True)
+            return
+
+        # ===== 5. Защита от повторного нажатия =====
+        if user.pvz_for_order_id:
+            await cb.answer("ПВЗ уже выбран. Продолжайте оформление.", show_alert=True)
+            return
+
+        # ===== 6. Парсим код ПВЗ =====
         raw_code = pvz.get("code")
         if isinstance(raw_code, str) and raw_code.startswith("MSK"):
             real_code = int(raw_code.replace("MSK", ""))
         elif isinstance(raw_code, int):
             real_code = raw_code
         elif isinstance(raw_code, str):
-            real_code = int(''.join(filter(str.isdigit, raw_code)))
+            real_code = int("".join(filter(str.isdigit, raw_code)))
         else:
             real_code = 0
 
@@ -1715,22 +1747,22 @@ async def cb_pvz_select(cb: CallbackQuery):
             await cb.answer("Ошибка кода ПВЗ", show_alert=True)
             return
 
-        # city_code — с fallback!
+        # ===== 7. city_code (код города, НЕ ПВЗ) =====
         city_code = pvz.get("location", {}).get("code") or Config.CDEK_FROM_CITY_CODE
         city_code = str(city_code)
 
         full_address = pvz["location"]["address_full"]
         work_time = pvz.get("work_time") or "Пн–Пт 10:00–20:00, Сб–Вс 10:00–18:00"
 
-        # Сохраняем выбранный ПВЗ в БД
+        # ===== 8. Сохраняем выбранный ПВЗ пользователю =====
         user.temp_selected_pvz = {
-            "code": real_code,
-            "city_code": city_code,
+            "code": real_code,          # код ПВЗ (126)
+            "city_code": city_code,     # код города (44)
             "address": full_address,
             "work_time": work_time
         }
 
-        # Расчёт доставки
+        # ===== 9. Считаем доставку =====
         delivery_info = await calculate_cdek_delivery_cost(city_code)
 
         delivery_cost = delivery_info["cost"] if delivery_info else 590
@@ -1743,7 +1775,7 @@ async def cb_pvz_select(cb: CallbackQuery):
         total = Config.PRICE_RUB + delivery_cost
         prepay = (total * Config.PREPAY_PERCENT + 99) // 100
 
-        # Создаём заказ
+        # ===== 10. Создаём заказ =====
         order = create_order_db(
             sess,
             user_id=cb.from_user.id,
@@ -1760,14 +1792,17 @@ async def cb_pvz_select(cb: CallbackQuery):
                 "delivery_period": period_text,
             }
         )
+
         order_id = order.id
 
-        # Важно: сохраняем флаг для подарочного сообщения
+        # ===== 11. Фиксируем заказ у пользователя =====
+        user.pvz_for_order_id = order_id
         user.awaiting_gift_message = True
 
-        sess.commit()  # ← всё сохраняется: и заказ, и user.temp_selected_pvz, и awaiting_gift_message
+        # ===== 12. Коммит ВСЕГО =====
+        sess.commit()
 
-    # ← здесь уже можно использовать order_id и локальные переменные
+    # ===== 13. UI — после выхода из сессии =====
     await edit_or_send(
         cb.message,
         f"<b>ПВЗ сохранён!</b>\n\n"
@@ -1785,17 +1820,20 @@ async def cb_pvz_select(cb: CallbackQuery):
             [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
         ])
     )
+
     await cb.answer("Готово!")
 
     await cb.message.answer(
-        "Хотите добавить личное послание в подарок получателю?\n(Текст будет вложен в коробочку)",
+        "Хотите добавить личное послание в подарок получателю?\n"
+        "(Текст будет вложен в коробочку)",
         reply_markup=create_inline_keyboard([
             [{"text": "Да, добавить", "callback_data": "gift:yes"}],
             [{"text": "Нет, без послания", "callback_data": "gift:no"}],
             [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
         ])
     )
-    
+
+
 
 @r.callback_query(F.data.startswith("gift:"))
 async def cb_gift_message(cb: CallbackQuery):
