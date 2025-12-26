@@ -47,7 +47,10 @@ def get_payment_lock(order_id: int) -> asyncio.Lock:
 def get_order_by_id(order_id: int, user_id: int) -> Optional[Order]:
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
-        return sess.get(Order, order_id) if sess.get(Order, order_id) and sess.get(Order, order_id).user_id == user_id else None
+        order = sess.get(Order, order_id)
+        if order and order.user_id == user_id:
+            return order
+        return None
 
 
 def get_all_orders_by_status(status: str) -> List[Order]:
@@ -1161,7 +1164,15 @@ async def cb_checkout_start(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
-    user.pvz_for_order_id = None
+
+        # СБРОС СОСТОЯНИЙ ПРЕДЫДУЩЕГО ЗАКАЗА
+        user.pvz_for_order_id = None
+        user.temp_selected_pvz = None
+        user.temp_pvz_list = None
+        user.awaiting_gift_message = False
+
+        sess.commit()
+
     if user.is_authorized:
         await cb.message.answer(
             f"Проверьте данные:\n• ФИО: {user.full_name}\n• Телефон: {user.phone}\n• Email: {user.email}\n\nХотите изменить?",
@@ -1298,9 +1309,7 @@ async def cb_pay(cb: CallbackQuery):
                     delivery_cost = order.extra_data.get("delivery_cost", 590)
                     order.total_price = Config.PRICE_RUB + delivery_cost
 
-                # ======================================================
-                # =================== FULL PAYMENT =====================
-                # ======================================================
+                # =================== FULL ===================
                 if kind == "full":
                     if order.status not in (
                         OrderStatus.NEW.value,
@@ -1322,22 +1331,24 @@ async def cb_pay(cb: CallbackQuery):
                         reply_markup=kb_order_status(order)
                     )
 
-                    success = await create_cdek_order(order.id)
-                    if success:
-                        order.status = OrderStatus.SHIPPED.value
-                        sess.commit()
-                        await notify_admins_order_shipped(order)
-                    else:
-                        order.status = OrderStatus.READY.value
-                        sess.commit()
-                        await notify_admin(
-                            f"⚠️ СДЭК не принял заказ #{order.id}, требуется внимание"
-                        )
+            # ⚠️ ВАЖНО: дальше мы ВНЕ Session
+            success = await create_cdek_order(oid)
 
-                # ======================================================
-                # =================== PREPAY ===========================
-                # ======================================================
-                elif kind == "pre":
+            if success:
+                await notify_admins_order_shipped(order)
+            else:
+                with Session(engine) as sess:
+                    order = sess.get(Order, oid)
+                    order.status = OrderStatus.READY.value
+                    sess.commit()
+                await notify_admin(
+                    f"⚠️ СДЭК не принял заказ #{oid}, требуется внимание"
+                )
+
+            # =================== PREPAY ===================
+            if kind == "pre":
+                with Session(engine) as sess:
+                    order = sess.get(Order, oid)
                     if order.status != OrderStatus.NEW.value:
                         await cb.answer("Предоплата уже внесена", show_alert=True)
                         return
@@ -1346,18 +1357,18 @@ async def cb_pay(cb: CallbackQuery):
                     order.status = OrderStatus.PREPAID.value
                     sess.commit()
 
-                    await notify_admins_payment_success(order)
+                await notify_admins_payment_success(order)
 
-                    await cb.message.answer(
-                        "Предоплата получена ❤️\n\n"
-                        f"Заказ <b>#{order.id}</b> принят в сборку.",
-                        reply_markup=kb_order_status(order)
-                    )
+                await cb.message.answer(
+                    "Предоплата получена ❤️\n\n"
+                    f"Заказ <b>#{order.id}</b> принят в сборку.",
+                    reply_markup=kb_order_status(order)
+                )
 
-                # ======================================================
-                # =================== REMAINDER ========================
-                # ======================================================
-                elif kind == "rem":
+            # =================== REMAINDER ===================
+            if kind == "rem":
+                with Session(engine) as sess:
+                    order = sess.get(Order, oid)
                     if order.status not in (
                         OrderStatus.PREPAID.value,
                         OrderStatus.READY.value
@@ -1369,29 +1380,26 @@ async def cb_pay(cb: CallbackQuery):
                     order.status = OrderStatus.PAID.value
                     sess.commit()
 
-                    await notify_admins_payment_remainder(order)
+                await notify_admins_payment_remainder(order)
 
-                    await cb.message.answer(
-                        "Дооплата получена ❤️\n\n"
-                        f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
-                        reply_markup=kb_order_status(order)
-                    )
+                await cb.message.answer(
+                    "Дооплата получена ❤️\n\n"
+                    f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
+                    reply_markup=kb_order_status(order)
+                )
 
-                    success = await create_cdek_order(order)
-                    if success:
-                        order.status = OrderStatus.SHIPPED.value
-                        sess.commit()
-                        await notify_admins_order_shipped(order)
-                    else:
+                success = await create_cdek_order(oid)
+
+                if success:
+                    await notify_admins_order_shipped(order)
+                else:
+                    with Session(engine) as sess:
+                        order = sess.get(Order, oid)
                         order.status = OrderStatus.READY.value
                         sess.commit()
-                        await notify_admin(
-                            f"⚠️ СДЭК не принял заказ #{order.id} после дооплаты"
-                        )
-
-                else:
-                    await cb.answer("Неизвестный тип оплаты", show_alert=True)
-                    return
+                    await notify_admin(
+                        f"⚠️ СДЭК не принял заказ #{oid} после дооплаты"
+                    )
 
             await cb.answer()
 
@@ -1601,24 +1609,35 @@ async def cb_admin_order_details(cb: CallbackQuery):
 async def cb_admin_set_ready(cb: CallbackQuery):
     logger.info(f"Set ready callback: user_id={cb.from_user.id}, data={cb.data}")
     try:
-        oid = int(cb.data.split(":")[2])  # Извлекаем oid из третьей части (admin:set_ready:1)
-        order = get_order_by_id(oid, 0)
-        if not order or order.status != OrderStatus.PREPAID.value:
-            await cb.answer("Нельзя перевести в готовность", show_alert=True)
-            return
-        if not await is_admin(cb):
-            logger.info("Admin access denied")
-            await cb.answer("Доступ запрещён", show_alert=True)
-            return
-        order.status = OrderStatus.READY.value
+        oid = int(cb.data.split(":")[2])  # admin:set_ready:1
+
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            order = sess.get(Order, oid)
+            if not order or order.status != OrderStatus.PREPAID.value:
+                await cb.answer("Нельзя перевести в готовность", show_alert=True)
+                return
+
+            if not await is_admin(cb):
+                logger.info("Admin access denied")
+                await cb.answer("Доступ запрещён", show_alert=True)
+                return
+
+            order.status = OrderStatus.READY.value
+            sess.commit()
+
         await notify_admins_order_ready(order)
         await notify_client_order_ready(order, cb.message)
         await edit_or_send(cb.message, f"Заказ #{oid} готов к отправке.", kb_admin_panel())
         await cb.answer()
+
     except Exception as e:
         logger.error(f"Admin set ready error: {e}")
-        await notify_admin(f"❌ Ошибка перевода заказа #{oid if 'oid' in locals() else 'неизвестный'} в готовность")
+        await notify_admin(
+            f"❌ Ошибка перевода заказа #{oid if 'oid' in locals() else 'неизвестный'} в готовность"
+        )
         await cb.answer("Ошибка", show_alert=True)
+
 
 
 @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_ARCHIVED.value))
@@ -1663,6 +1682,7 @@ async def cb_admin_set_track(cb: CallbackQuery):
                 return
         user.awaiting_manual_track = True
         user.temp_order_id_for_track = oid
+        sess.commit()
         await cb.message.answer(
             f"Введите трек-номер для заказа #{oid}:",
             reply_markup=create_inline_keyboard(
@@ -1753,7 +1773,7 @@ async def cb_pvz_select(cb: CallbackQuery):
             return
 
         # ===== 5. Защита от повторного выбора =====
-        if getattr(user, "pvz_for_order_id", None):
+        if user.pvz_for_order_id is not None:
             await cb.answer("ПВЗ уже выбран. Продолжайте оформление.", show_alert=True)
             return
 
@@ -1864,34 +1884,27 @@ async def cb_gift_message(cb: CallbackQuery):
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-    if cb.data == "gift:yes":
-        # user.awaiting_gift_message = True
-        # user.gift_message = None
-        await cb.message.answer(
-            "Напишите текст послания (до 300 символов):",
-            reply_markup=create_inline_keyboard([[{"text": "Отмена", "callback_data": "gift:cancel"}]])
-        )
-    elif cb.data == "gift:no":
-        engine = make_engine(Config.DB_PATH)
-        with Session(engine) as sess:
+        if cb.data == "gift:yes":
+            user.awaiting_gift_message = True
+            sess.commit()
+
+            await cb.message.answer(
+                "Напишите текст послания (до 300 символов):",
+                reply_markup=create_inline_keyboard(
+                    [[{"text": "Отмена", "callback_data": "gift:cancel"}]]
+                )
+            )
+
+        elif cb.data == "gift:no":
+            user.awaiting_gift_message = False
+            sess.commit()
+
             orders = get_user_orders_db(sess, cb.from_user.id)
-            if not orders:
-                await cb.message.answer("Заказ не найден.")
-                return
+            if orders:
+                await show_review(cb.message, orders[-1])
 
-            order = orders[-1]
-
-        await show_review(cb.message, order)
-    else:
-        # user.awaiting_gift_message = False
-        orders = get_user_orders_db(sess, cb.from_user.id)
-        if orders:
-            order = orders[-1]  # самый новый
-            await show_review(cb.message, order)
-        else:
-            await cb.message.answer("У вас нет заказов.")
-    sess.commit()
     await cb.answer()
+
 
 
 @r.callback_query(F.data == "pvz_manual")
