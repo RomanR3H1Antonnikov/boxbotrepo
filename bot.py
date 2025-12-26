@@ -115,6 +115,7 @@ async def calculate_cdek_delivery_cost(pvz_code: str) -> Optional[dict]:
     url = "https://api.edu.cdek.ru/v2/calculator/tariff"
     payload = {
         "type": 1,
+        "tariff_code": 136,
         "from_location": {"code": Config.CDEK_FROM_CITY_CODE},
         "to_location": {"code": pvz_code},
         "packages": [{
@@ -1761,6 +1762,8 @@ async def cb_pvz_select(cb: CallbackQuery):
                     "delivery_period": period_text,
                 }
             )
+            order.id = order.id
+            sess.commit()
 
         # ←←← ВАЖНО: используем правильные callback_data! ←←←
         await edit_or_send(
@@ -1795,7 +1798,6 @@ async def cb_pvz_select(cb: CallbackQuery):
     except Exception as e:
         logger.error(f"cb_pvz_select error: {e}", exc_info=True)
         await cb.answer("Ошибка", show_alert=True)
-    sess.commit()
 
 
 @r.callback_query(F.data.startswith("gift:"))
