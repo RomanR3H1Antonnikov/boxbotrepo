@@ -35,6 +35,7 @@ class User(Base):
     # Связи
     orders: Mapped[list["Order"]] = relationship(back_populates="user", lazy="selectin")
     access: Mapped["Access"] = relationship(back_populates="user", uselist=False, lazy="joined")
+    awaiting_auth: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
 
     is_authorized: Mapped[bool] = mapped_column(Boolean, default=False)  # вместо проверки full_name/phone/email
     practices: Mapped[list[str]] = mapped_column(JSON, default=list)  # для практик

@@ -963,13 +963,21 @@ async def cb_auth_start(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
-    # user.awaiting_contact = True
+
+        user.awaiting_auth = True
+        sess.commit()
+
     await cb.message.answer(
-        "Введите данные в 3 строки:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
-        reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.CABINET.value}]])
+        "Введите данные в 3 строки:\n"
+        "Имя Фамилия\n"
+        "+7XXXXXXXXXX\n"
+        "email@example.com",
+        reply_markup=create_inline_keyboard([
+            [{"text": "Отмена", "callback_data": CallbackData.MENU.value}]
+        ])
     )
-    sess.commit()
     await cb.answer()
+
 
 # ========== GALLERY + FAQ + TEAM ==========
 @r.callback_query(F.data == CallbackData.GALLERY.value)
@@ -1169,6 +1177,7 @@ async def cb_checkout_start(cb: CallbackQuery):
         user.temp_selected_pvz = None
         user.temp_pvz_list = None
         user.awaiting_gift_message = False
+        user.awaiting_auth = False
 
         sess.commit()
 
@@ -1485,12 +1494,12 @@ async def cb_change_addr(cb: CallbackQuery):
                 await cb.answer("Ошибка доступа", show_alert=True)
                 return
 
-            order = get_order_by_id(oid, cb.from_user.id)
-            if not order:
+            order = sess.get(Order, oid)
+            if not order or order.user_id != cb.from_user.id:
                 await cb.answer("Заказ не найден", show_alert=True)
                 return
-
-        user.pvz_for_order_id = oid
+            user.pvz_for_order_id = oid
+            sess.commit()
 
         await cb.message.answer(
             "Введите новый адрес ПВЗ (например: «Профсоюзная, 93»):",
@@ -1891,10 +1900,11 @@ async def cb_gift_yes(cb: CallbackQuery):
         # === ФИКСИРУЕМ КОНКРЕТНЫЙ ЗАКАЗ ===
         user.awaiting_gift_message = True
         user.temp_gift_order_id = order.id
+        user.awaiting_auth = False
         sess.commit()
 
-    await cb.message.answer(
-        "Напишите текст послания (до 300 символов):",
+    await cb.message.edit_text(
+        "✍️ Напишите текст послания (до 300 символов):",
         reply_markup=create_inline_keyboard([
             [{"text": "Отмена", "callback_data": "gift:cancel"}]
         ])
@@ -1926,6 +1936,7 @@ async def cb_gift_no(cb: CallbackQuery):
         user.temp_gift_order_id = None
         sess.commit()
 
+    await cb.message.edit_text("Ок, без послания.", reply_markup=None)
     await send_payment_keyboard(cb.message, order)
     await cb.answer()
 
@@ -1950,23 +1961,27 @@ async def send_payment_keyboard(msg: Message, order):
 @r.callback_query(F.data == "gift:cancel")
 async def cb_gift_cancel(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
+
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
+        order_id = user.temp_gift_order_id
+        if not order_id:
+            await cb.answer("Заказ не найден", show_alert=True)
+            return
+
+        order = sess.get(Order, order_id)
+
         user.awaiting_gift_message = False
         user.temp_gift_order_id = None
         sess.commit()
 
-    await cb.message.answer(
-        "Ок, без послания. Можете переходить к оплате.",
-        reply_markup=kb_main()
-    )
+    await cb.message.edit_text("Ок, без послания.", reply_markup=None)
+    await send_payment_keyboard(cb.message, order)
     await cb.answer()
-
-
 
 
 @r.callback_query(F.data == "pvz_manual")
@@ -2197,34 +2212,37 @@ async def on_message_router(message: Message):
             return
 
         # ===== 3. АВТОРИЗАЦИЯ =====
-        if not user.is_authorized:
+        # ===== АВТОРИЗАЦИЯ (ТОЛЬКО ПО СОСТОЯНИЮ) =====
+        if user.awaiting_auth:
             lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-            if len(lines) == 3:
-                full_name, phone, email = lines
-                ok, msg = validate_data(full_name, phone, email)
-                if ok:
-                    user.full_name = full_name
-                    user.phone = phone
-                    user.email = email
-                    user.is_authorized = True
-                    sess.commit()
+            if len(lines) != 3:
+                await message.answer(
+                    "Введите данные в 3 строки:\n"
+                    "Имя Фамилия\n"
+                    "+7XXXXXXXXXX\n"
+                    "email@example.com"
+                )
+                return
 
-                    await message.answer(
-                        f"Спасибо, {full_name.split()[0]}! Данные сохранены.\n"
-                        "Теперь вы авторизованы.",
-                        reply_markup=kb_main()
-                    )
-                    return
-                else:
-                    await message.answer(f"Ошибка: {msg}")
-                    return
+            full_name, phone, email = lines
+            ok, msg = validate_data(full_name, phone, email)
+
+            if not ok:
+                await message.answer(f"Ошибка: {msg}")
+                return
+
+            user.full_name = full_name
+            user.phone = phone
+            user.email = email
+            user.is_authorized = True
+            user.awaiting_auth = False
+            sess.commit()
 
             await message.answer(
-                "Введите данные в 3 строки:\n"
-                "Имя Фамилия\n"
-                "+7XXXXXXXXXX\n"
-                "email@example.com"
+                f"Спасибо, {full_name.split()[0]}! Данные сохранены.\n"
+                "Теперь вы авторизованы.",
+                reply_markup=kb_main()
             )
             return
 
