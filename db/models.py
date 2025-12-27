@@ -15,39 +15,58 @@ from .base import Base
 class User(Base):
     __tablename__ = "users"
 
+    # ==================== Основные данные пользователя ====================
     telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     email: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # ==================== Флаги прогресса и доступа ====================
     gallery_viewed: Mapped[bool] = mapped_column(Boolean, default=False)
     team_viewed: Mapped[bool] = mapped_column(Boolean, default=False)
     practices_access: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_authorized: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # ==================== Практики и временные данные ====================
+    practices: Mapped[list[str]] = mapped_column(JSON, default=list)  # список названий практик
+    temp_pvz_list: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True, default=None)
+    temp_selected_pvz: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # ==================== Дополнительные данные ====================
+    extra_data: Mapped[dict] = mapped_column(
+        JSON, default=dict, server_default=text("'{}'"), nullable=False
+    )
+
+    # ==================== Состояния ожидания ввода ====================
+    awaiting_auth: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
+    awaiting_gift_message: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
+    awaiting_pvz_address: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
+    awaiting_manual_pvz: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
+    awaiting_manual_track: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ==================== Временные ID для текущих операций ====================
+    pvz_for_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    temp_gift_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    temp_order_id_for_track: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # ==================== Метаданные ====================
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc)
-    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc),)
 
-    # Связи
+    # ==================== Связи ====================
     orders: Mapped[list["Order"]] = relationship(back_populates="user", lazy="selectin")
     access: Mapped["Access"] = relationship(back_populates="user", uselist=False, lazy="joined")
-    awaiting_auth: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
-
-    is_authorized: Mapped[bool] = mapped_column(Boolean, default=False)  # вместо проверки full_name/phone/email
-    practices: Mapped[list[str]] = mapped_column(JSON, default=list)  # для практик
-    temp_pvz_list: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True, default=None)
-    temp_selected_pvz: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # временные данные
-    extra_data: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("'{}'"), nullable=False)
-    awaiting_gift_message: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
-    pvz_for_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    awaiting_pvz_address: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
-    awaiting_manual_pvz: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
-    awaiting_manual_track: Mapped[bool] = mapped_column(Boolean, default=False)
-    temp_order_id_for_track: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Product(Base):
