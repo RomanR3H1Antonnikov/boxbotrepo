@@ -2018,7 +2018,7 @@ async def cb_gift_no(cb: CallbackQuery):
         order_id = user.temp_gift_order_id
 
         if not order_id:
-            await cb.answer("Хорошо, переходим к оплате", show_alert=False)
+            await cb.answer("Хорошо, переходим к оплате")
             return
 
         order = sess.get(Order, order_id)
@@ -2037,7 +2037,7 @@ async def cb_gift_no(cb: CallbackQuery):
 
     await cb.message.edit_text("Ок, без послания.", reply_markup=None)
     await send_payment_keyboard(cb.message, order)
-    await cb.answer()
+    await cb.answer("Хорошо, переходим к оплате")
 
 
 async def send_payment_keyboard(msg: Message, order):
