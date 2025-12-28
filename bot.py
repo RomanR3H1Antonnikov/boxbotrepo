@@ -53,11 +53,11 @@ def get_order_by_id(order_id: int, user_id: int) -> Optional[Order]:
         return None
 
 
-def get_all_orders_by_status(status: str) -> List[Order]:
+def get_all_orders_by_status(status: str) -> list[Order]:
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         stmt = select(Order).where(Order.status == status)
-        return sess.scalars(stmt).all()
+        return list(sess.scalars(stmt).all())
 
 
 # ==============DATA=============
@@ -651,14 +651,20 @@ async def notify_admins_order_address_changed(order: Order):
 
 
 async def notify_client_order_ready(order: Order, message: Message):
+    text = format_client_order_info(order)
     await message.answer(
-        f"Ваш заказ #{order.id} собран! Требуется дооплата {order.remainder_amount} ₽.",
+        text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
         reply_markup=kb_ready_message(order)
     )
 
 async def notify_client_order_shipped(order: Order, message: Message):
+    text = format_client_order_info(order)
     await message.answer(
-        f"Ваш заказ #{order.id} отправлен! Трек-номер: {order.track}",
+        text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
         reply_markup=kb_order_status(order)
     )
 
@@ -673,22 +679,34 @@ async def edit_or_send(
     msg: Message,
     text: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
-    *, force_new: bool = False, edit_only: bool = False
+    *,
+    force_new: bool = False,
+    edit_only: bool = False,
+    parse_mode: str | None = "HTML",
+    disable_web_page_preview: bool = True
 ):
+    common_kwargs = {
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": disable_web_page_preview,
+        "reply_markup": reply_markup
+    }
+
     if force_new:
-        return await msg.answer(text, reply_markup=reply_markup)
+        return await msg.answer(text, **common_kwargs)
+
     if edit_only:
         try:
-            await msg.edit_text(text, reply_markup=reply_markup)
+            await msg.edit_text(text, **common_kwargs)
             return
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
                 logger.warning(f"Edit failed (edit_only): {e}")
             return
+
     try:
-        await msg.edit_text(text, reply_markup=reply_markup)
+        await msg.edit_text(text, **common_kwargs)
     except TelegramBadRequest:
-        await msg.answer(text, reply_markup=reply_markup)
+        await msg.answer(text, **common_kwargs)
 
 # ========== КОМАНДА ТЕСТА СДЭК (РАБОЧАЯ!) ==========
 @r.message(Command("test_cdek_token"))
@@ -861,7 +879,8 @@ def kb_admin_order_actions(order: Order) -> InlineKeyboardMarkup:
     if order.status == OrderStatus.PREPAID.value:
         buttons.append([{"text": "Готов к отправке", "callback_data": f"{CallbackData.ADMIN_SET_READY.value}:{order.id}"}])
     if order.status in [OrderStatus.READY.value, OrderStatus.PAID.value] and not order.track:
-        buttons.append([{"text": "Ввести трек вручную", "callback_data": f"{CallbackData.ADMIN_SET_TRACK.value}:{order.id}"}])
+        if order.extra_data.get("manual_pvz", False):  # ← ДОБАВИТЬ УСЛОВИЕ
+            buttons.append([{"text": "Ввести трек вручную", "callback_data": f"{CallbackData.ADMIN_SET_TRACK.value}:{order.id}"}])
     elif order.status == OrderStatus.SHIPPED.value:
         buttons.append([{"text": "Архивировать", "callback_data": f"{CallbackData.ADMIN_SET_ARCHIVED.value}:{order.id}"}])
     buttons.append([{"text": "Назад", "callback_data": CallbackData.ADMIN_PANEL.value}])
@@ -883,7 +902,7 @@ def format_order_admin(order: Order) -> str:
         u = get_user_by_id(sess, order.user_id)
         full_name = u.full_name if u else "Неизвестно"
     pvz_code = order.extra_data.get("pvz_code", "—")
-    gift = order.extra_data.get("gift_message")
+    gift = order.extra_data.get("gift_message", "—")
     gift_text = f"Послание в подарок:\n{gift}\n\n" if gift else ""
     return (
         f"Заказ #{order.id}\n"
@@ -895,6 +914,87 @@ def format_order_admin(order: Order) -> str:
         f"Тип оплаты: {order.payment_kind or '—'}\n\n"
         f"{gift_text}"
     )
+
+
+def format_client_order_info(order: Order) -> str:
+    # Русские названия статусов
+    status_map = {
+        OrderStatus.NEW.value: "🆕 Новый заказ",
+        OrderStatus.PREPAID.value: "✅ Предоплачен (30%)",
+        OrderStatus.READY.value: "📦 Готов к отправке — ждём дооплату",
+        OrderStatus.PAID.value: "💳 Полностью оплачен",
+        OrderStatus.SHIPPED.value: "🚚 Отправлен",
+        OrderStatus.ARCHIVED.value: "✅ Доставлен и завершён",
+        OrderStatus.ABANDONED.value: "❌ Отменён",
+    }
+    status_text = status_map.get(order.status, f"Статус: {order.status}")
+
+    lines = [
+        f"<b>Заказ #{order.id}</b>",
+        f"<b>{status_text}</b>",
+        "",
+        "📦 <b>Товар:</b> Коробочка «Отпусти тревогу»",
+        f"💰 <b>Цена:</b> {Config.PRICE_RUB} ₽",
+    ]
+
+    # Доставка
+    delivery_cost = order.extra_data.get("delivery_cost", 0)
+    period = order.extra_data.get("delivery_period", "3–7")
+    lines += [
+        "",
+        "🚚 <b>Доставка:</b> ПВЗ СДЭК",
+        f"💸 Стоимость доставки: <b>{delivery_cost} ₽</b>",
+        f"⏳ Срок доставки: ≈ <b>{period} дн.</b>",
+        f"📍 <b>Адрес ПВЗ:</b>\n{order.address}",
+    ]
+
+    # Послание
+    gift = order.extra_data.get("gift_message")
+    if gift:
+        lines += [
+            "",
+            "💌 <b>Личное послание в подарок:</b>",
+            f"<i>{gift}</i>",
+        ]
+
+    # Оплата — подробнее
+    total = order.total_price
+    prepay_amount = (total * Config.PREPAY_PERCENT + 99) // 100
+    remainder = total - prepay_amount
+
+    lines += ["", "💳 <b>Оплата:</b>"]
+
+    if order.status == OrderStatus.NEW.value:
+        lines += [
+            f"К оплате: <b>{total} ₽</b>",
+            f"   • Вариант: предоплата {Config.PREPAY_PERCENT}% ({prepay_amount} ₽)",
+            f"   • Вариант: полная оплата ({total} ₽)",
+        ]
+    elif order.status == OrderStatus.PREPAID.value:
+        lines += [
+            f"✅ Предоплата получена: {prepay_amount} ₽",
+            f"🔄 Остаток к оплате: <b>{remainder} ₽</b>",
+        ]
+    elif order.status == OrderStatus.READY.value:
+        lines += [
+            f"✅ Предоплата: {prepay_amount} ₽",
+            f"Ожидаем дооплату: <b>{remainder} ₽</b>",
+        ]
+    elif order.status in [OrderStatus.PAID.value, OrderStatus.SHIPPED.value, OrderStatus.ARCHIVED.value]:
+        lines += [f"✅ Полностью оплачено: {total} ₽"]
+    else:
+        lines += [f"Сумма: {total} ₽"]
+
+    # Трек
+    if order.track and order.track not in ("—", None, ""):
+        lines += [
+            "",
+            f"📮 <b>Трек-номер:</b> <code>{order.track}</code>",
+            f'<a href="https://www.cdek.ru/ru/tracking?order_id={order.track}">Отследить посылку</a>',
+        ]
+
+    return "\n".join(lines)
+
 
 # ========== START / MENU ==========
 @r.message(CommandStart())
@@ -1422,27 +1522,14 @@ async def cb_order_status(cb: CallbackQuery):
             await cb.answer("Заказ не найден", show_alert=True)
             return
 
-        status_text = {
-            OrderStatus.SHIPPED.value: f"Отправлен!\nТрек: <code>{order.track}</code>",
-            OrderStatus.READY.value: f"Готов к отправке\nОстаток: {order.remainder_amount} ₽",
-            OrderStatus.PAID.value: "Оплачен полностью\nОжидает отправки",
-            OrderStatus.PREPAID.value: f"Предоплачено\nОстаток: {order.remainder_amount} ₽",
-        }.get(order.status, f"Статус: {order.status}")
-
-        # ←←← Добавляем срок доставки ←←←
-        period = order.extra_data.get("delivery_period")
-        if period and order.status in [
-            OrderStatus.PREPAID.value,
-            OrderStatus.READY.value,
-            OrderStatus.PAID.value,
-            OrderStatus.SHIPPED.value
-        ]:
-            status_text += f"\nСрок доставки: ≈ <b>{period} дн.</b>"
+        text = format_client_order_info(order)
 
         await edit_or_send(
             cb.message,
-            f"Заказ #{order.id}\n\n{status_text}",
-            kb_order_status(order)
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=kb_order_status(order)
         )
         await cb.answer()
     except Exception as e:
@@ -1705,6 +1792,7 @@ async def cb_pvz_reenter(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
+        user.awaiting_pvz_address = True
         user.awaiting_manual_pvz = False
 
     await cb.message.edit_text(
@@ -1860,6 +1948,8 @@ async def cb_pvz_select(cb: CallbackQuery):
 
     await cb.answer("Готово!")
 
+    user.temp_gift_order_id = order.id
+
     await cb.message.answer(
         "Хотите добавить личное послание в подарок получателю?\n"
         "(Текст будет вложен в коробочку)",
@@ -1928,7 +2018,7 @@ async def cb_gift_no(cb: CallbackQuery):
         order_id = user.temp_gift_order_id
 
         if not order_id:
-            await cb.answer("Хорошо", show_alert=False)
+            await cb.answer("Хорошо, переходим к оплате", show_alert=False)
             return
 
         order = sess.get(Order, order_id)
@@ -2168,6 +2258,39 @@ async def on_message_router(message: Message):
 
             await message.answer("💌 Послание сохранено!")
             await send_payment_keyboard(message, order)
+            return
+
+
+        # ===== ВВОД ТРЕК-НОМЕРА АДМИНОМ =====
+        if user.awaiting_manual_track:
+            order_id = user.temp_order_id_for_track
+            if not order_id:
+                user.awaiting_manual_track = False
+                sess.commit()
+                await message.answer("Нет активного заказа для трека.", reply_markup=kb_admin_panel())
+                return
+
+            order = sess.get(Order, order_id)
+            if not order or order.status not in [OrderStatus.READY.value, OrderStatus.PAID.value]:
+                user.awaiting_manual_track = False
+                sess.commit()
+                await message.answer("Заказ не готов к вводу трека.", reply_markup=kb_admin_panel())
+                return
+
+            track = text.strip()
+            if not track or len(track) < 5:  # Простая валидация
+                await message.answer("Некорректный трек-номер. Попробуйте заново.")
+                return
+
+            order.track = track
+            order.status = OrderStatus.SHIPPED.value
+            user.awaiting_manual_track = False
+            user.temp_order_id_for_track = None
+            sess.commit()
+
+            await notify_admins_order_shipped(order)
+            await notify_client_order_shipped(order, message)
+            await message.answer(f"Трек {track} сохранён для #{order.id}. Заказ отправлен!", reply_markup=kb_admin_panel())
             return
 
 
