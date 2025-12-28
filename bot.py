@@ -1935,7 +1935,7 @@ async def cb_pvz_select(cb: CallbackQuery):
 
         sess.commit()
 
-    # ===== 12. UI =====
+    # ===== 12. UI (вне сессии) =====
     await edit_or_send(
         cb.message,
         f"<b>ПВЗ сохранён!</b>\n\n"
@@ -1948,7 +1948,7 @@ async def cb_pvz_select(cb: CallbackQuery):
 
     await cb.answer("Готово!")
 
-    user.temp_gift_order_id = order.id
+    user.temp_gift_order_id = order_id
 
     await cb.message.answer(
         "Хотите добавить личное послание в подарок получателю?\n"
