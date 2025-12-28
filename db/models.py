@@ -124,7 +124,7 @@ class Order(Base):
     payments: Mapped[list["Payment"]] = relationship(back_populates="order", cascade="all, delete-orphan")
     redeem_use: Mapped["RedeemUse | None"] = relationship(back_populates="order", uselist=False)
 
-    extra_data: Mapped[dict] = mapped_column(JSON, default=dict)  # для pvz_code, delivery_period и т.д.
+    extra_data: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("'{}'"), nullable=False)
     payment_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)  # "full", "pre", "remainder"
 
     @property

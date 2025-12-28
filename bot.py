@@ -902,7 +902,7 @@ def format_order_admin(order: Order) -> str:
         u = get_user_by_id(sess, order.user_id)
         full_name = u.full_name if u else "Неизвестно"
     pvz_code = order.extra_data.get("pvz_code", "—")
-    gift = order.extra_data.get("gift_message", "")
+    gift = order.extra_data.get("gift_message", "").strip()
     gift_text = f"Послание в подарок:\n{gift or '—'}\n\n"
     return (
         f"Заказ #{order.id}\n"
@@ -2006,12 +2006,11 @@ async def cb_gift_yes(cb: CallbackQuery):
     await cb.answer()
 
 
-
 @r.callback_query(F.data == "gift:no")
 async def cb_gift_no(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
 
-    order_id = None  # сохраним ID заказа
+    order_id = None
 
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
@@ -2039,14 +2038,16 @@ async def cb_gift_no(cb: CallbackQuery):
         user.temp_gift_order_id = None
         sess.commit()
 
-    # Теперь вне сессии — перечитываем заказ по ID
-    order = get_order_by_id(order_id, cb.from_user.id)
-    if not order:
-        await cb.answer("Ошибка заказа", show_alert=True)
-        return
+    if order_id:
+        order = get_order_by_id(order_id, cb.from_user.id)
+        if order:
+            await cb.message.edit_text("Ок, без послания. Переходим к оплате...")
+            await send_payment_keyboard(cb.message, order)
+        else:
+            await cb.message.edit_text("Ошибка: заказ не найден.")
+    else:
+        await cb.message.edit_text("Ок, без послания.")
 
-    await cb.message.edit_text("Ок, без послания. Переходим к оплате...")
-    await send_payment_keyboard(cb.message, order)
     await cb.answer()
 
 
@@ -2262,6 +2263,7 @@ async def on_message_router(message: Message):
                 return
 
             order.extra_data["gift_message"] = text
+            logger.info(f"Сохранено послание для заказа #{order.id}: '{text}' | extra_data после: {order.extra_data}")
             user.awaiting_gift_message = False
             user.temp_gift_order_id = None
             sess.commit()
