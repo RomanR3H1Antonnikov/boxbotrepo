@@ -902,8 +902,8 @@ def format_order_admin(order: Order) -> str:
         u = get_user_by_id(sess, order.user_id)
         full_name = u.full_name if u else "Неизвестно"
     pvz_code = order.extra_data.get("pvz_code", "—")
-    gift = order.extra_data.get("gift_message", "—")
-    gift_text = f"Послание в подарок:\n{gift}\n\n" if gift else ""
+    gift = order.extra_data.get("gift_message", "")
+    gift_text = f"Послание в подарок:\n{gift or '—'}\n\n"
     return (
         f"Заказ #{order.id}\n"
         f"Пользователь: {full_name} ({order.user_id})\n"
@@ -1792,8 +1792,11 @@ async def cb_pvz_reenter(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
+
         user.awaiting_pvz_address = True
-        user.awaiting_manual_pvz = False
+        user.temp_pvz_list = None
+        user.temp_selected_pvz = None
+        sess.commit()
 
     await cb.message.edit_text(
         "Введите адрес ПВЗ ещё раз (например: Барклая, 5А):",
@@ -1801,7 +1804,6 @@ async def cb_pvz_reenter(cb: CallbackQuery):
             [{"text": "Отмена", "callback_data": CallbackData.MENU.value}]
         ])
     )
-    sess.commit()
     await cb.answer()
 
 
@@ -2009,6 +2011,8 @@ async def cb_gift_yes(cb: CallbackQuery):
 async def cb_gift_no(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
 
+    order_id = None  # сохраним ID заказа
+
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         if not user:
@@ -2018,7 +2022,8 @@ async def cb_gift_no(cb: CallbackQuery):
         order_id = user.temp_gift_order_id
 
         if not order_id:
-            await cb.answer("Хорошо, переходим к оплате")
+            await cb.message.edit_text("Ок, без послания. Переходим к оплате...")
+            await cb.answer()
             return
 
         order = sess.get(Order, order_id)
@@ -2026,18 +2031,23 @@ async def cb_gift_no(cb: CallbackQuery):
             user.awaiting_gift_message = False
             user.temp_gift_order_id = None
             sess.commit()
-
             await cb.answer("Заказ недоступен", show_alert=True)
             return
 
-        # закрываем состояние
+        # Сбрасываем состояние
         user.awaiting_gift_message = False
         user.temp_gift_order_id = None
         sess.commit()
 
-    await cb.message.edit_text("Ок, без послания.", reply_markup=None)
+    # Теперь вне сессии — перечитываем заказ по ID
+    order = get_order_by_id(order_id, cb.from_user.id)
+    if not order:
+        await cb.answer("Ошибка заказа", show_alert=True)
+        return
+
+    await cb.message.edit_text("Ок, без послания. Переходим к оплате...")
     await send_payment_keyboard(cb.message, order)
-    await cb.answer("Хорошо, переходим к оплате")
+    await cb.answer()
 
 
 async def send_payment_keyboard(msg: Message, order):
