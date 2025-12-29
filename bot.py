@@ -1379,7 +1379,7 @@ async def cb_pay(cb: CallbackQuery):
         await cb.answer("Ошибка оплаты", show_alert=True)
         return
 
-    kind = parts[1]   # full | pre | rem
+    kind = parts[1]  # full | pre | rem
     try:
         oid = int(parts[2])
     except ValueError:
@@ -1476,6 +1476,12 @@ async def cb_pay(cb: CallbackQuery):
                         f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
                         reply_markup=kb_order_status(order)
                     )
+
+            with Session(engine) as sess:
+                user = get_user_by_id(sess, cb.from_user.id)
+                if user and user.temp_gift_order_id == oid:
+                    user.temp_gift_order_id = None
+                    sess.commit()
 
             # Создание заказа в СДЭК — ВНЕ сессии
             if need_cdek_create:
@@ -2002,9 +2008,6 @@ async def cb_gift_yes(cb: CallbackQuery):
 async def cb_gift_no(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
 
-    order_id = None
-    order = None
-
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         if not user:
@@ -2012,28 +2015,22 @@ async def cb_gift_no(cb: CallbackQuery):
             return
 
         order_id = user.temp_gift_order_id
-
+        order = None
         if order_id:
             order = sess.get(Order, order_id)
             if not order or order.user_id != cb.from_user.id:
                 order = None
-                order_id = None
 
-        # Сбрасываем состояние в любом случае
         user.awaiting_gift_message = False
-        user.temp_gift_order_id = None
         sess.commit()
 
-    # Отправляем новое сообщение (не edit!)
     await cb.message.answer("Ок, без послания. Переходим к оплате...")
 
-    # Если был активный заказ — показываем оплату
     if order and order.status == OrderStatus.NEW.value:
         await send_payment_keyboard(cb.message, order)
     else:
-        # На всякий случай — если заказ пропал, предлагаем начать заново
         await cb.message.answer(
-            "Что-то пошло не так с заказом. Давайте начнём оформление заново.",
+            "Не удалось найти активный заказ. Начните оформление заново.",
             reply_markup=kb_main()
         )
 
@@ -2061,29 +2058,16 @@ async def send_payment_keyboard(msg: Message, order):
 async def cb_gift_cancel(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
 
-    order_id = None
-    order = None
-
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-        order_id = user.temp_gift_order_id
-
-        if order_id:
-            order = sess.get(Order, order_id)
-            if not order or order.user_id != cb.from_user.id:
-                order = None
-                order_id = None
-
-        # Сбрасываем ввод послания
         user.awaiting_gift_message = False
-        user.temp_gift_order_id = None  # можно оставить, но сбросим для чистоты
         sess.commit()
 
-    # Возвращаем пользователя к выбору: добавить послание или нет
+    # Возвращаем к выбору
     await cb.message.edit_text(
         "Хотите добавить личное послание в подарок получателю?\n"
         "(Текст будет вложен в коробочку)",
@@ -2093,7 +2077,7 @@ async def cb_gift_cancel(cb: CallbackQuery):
         ])
     )
 
-    await cb.answer("Отменено. Выберите действие:")
+    await cb.answer("Отменено — выберите снова")
 
 
 
@@ -2263,11 +2247,19 @@ async def on_message_router(message: Message):
                 await message.answer("Максимум 300 символов.")
                 return
 
-            order.extra_data["gift_message"] = text
-            logger.info(f"Сохранено послание для заказа #{order.id}: '{text}' | extra_data после: {order.extra_data}")
+            logger.info(f"Перед сохранением: order.extra_data = {order.extra_data}")
+
+            if order.extra_data is None:
+                order.extra_data = {}
+            order.extra_data["gift_message"] = text.strip()
+
+            logger.info(f"После сохранения: order.extra_data = {order.extra_data}")
+
             user.awaiting_gift_message = False
             user.temp_gift_order_id = None
             sess.commit()
+
+            logger.info(f"Коммит завершён для заказа #{order.id}")
 
             await message.answer("💌 Послание сохранено!")
             await send_payment_keyboard(message, order)
