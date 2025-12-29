@@ -2003,6 +2003,7 @@ async def cb_gift_no(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
 
     order_id = None
+    order = None
 
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
@@ -2012,31 +2013,29 @@ async def cb_gift_no(cb: CallbackQuery):
 
         order_id = user.temp_gift_order_id
 
-        if not order_id:
-            # Просто подтверждаем и выходим
-            await cb.answer("Ок, без послания")
-            return
+        if order_id:
+            order = sess.get(Order, order_id)
+            if not order or order.user_id != cb.from_user.id:
+                order = None
+                order_id = None
 
-        order = sess.get(Order, order_id)
-        if not order or order.user_id != cb.from_user.id:
-            user.awaiting_gift_message = False
-            user.temp_gift_order_id = None
-            sess.commit()
-            await cb.answer("Заказ недоступен", show_alert=True)
-            return
-
-        # Сбрасываем состояние
+        # Сбрасываем состояние в любом случае
         user.awaiting_gift_message = False
         user.temp_gift_order_id = None
         sess.commit()
 
+    # Отправляем новое сообщение (не edit!)
     await cb.message.answer("Ок, без послания. Переходим к оплате...")
 
-    # Перечитываем заказ и отправляем клавиатуру оплаты
-    if order_id:
-        order = get_order_by_id(order_id, cb.from_user.id)
-        if order:
-            await send_payment_keyboard(cb.message, order)
+    # Если был активный заказ — показываем оплату
+    if order and order.status == OrderStatus.NEW.value:
+        await send_payment_keyboard(cb.message, order)
+    else:
+        # На всякий случай — если заказ пропал, предлагаем начать заново
+        await cb.message.answer(
+            "Что-то пошло не так с заказом. Давайте начнём оформление заново.",
+            reply_markup=kb_main()
+        )
 
     await cb.answer()
 
@@ -2062,6 +2061,9 @@ async def send_payment_keyboard(msg: Message, order):
 async def cb_gift_cancel(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
 
+    order_id = None
+    order = None
+
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         if not user:
@@ -2069,20 +2071,29 @@ async def cb_gift_cancel(cb: CallbackQuery):
             return
 
         order_id = user.temp_gift_order_id
-        if not order_id:
-            await cb.answer("Хорошо", show_alert=False)
-            return
 
-        order = sess.get(Order, order_id)
+        if order_id:
+            order = sess.get(Order, order_id)
+            if not order or order.user_id != cb.from_user.id:
+                order = None
+                order_id = None
 
+        # Сбрасываем ввод послания
         user.awaiting_gift_message = False
-        user.temp_gift_order_id = None
+        user.temp_gift_order_id = None  # можно оставить, но сбросим для чистоты
         sess.commit()
 
-    await cb.message.edit_text("Ок, без послания.", reply_markup=None)
-    if order:
-        await send_payment_keyboard(cb.message, order)
-    await cb.answer()
+    # Возвращаем пользователя к выбору: добавить послание или нет
+    await cb.message.edit_text(
+        "Хотите добавить личное послание в подарок получателю?\n"
+        "(Текст будет вложен в коробочку)",
+        reply_markup=create_inline_keyboard([
+            [{"text": "Да, добавить", "callback_data": "gift:yes"}],
+            [{"text": "Нет, без послания", "callback_data": "gift:no"}],
+        ])
+    )
+
+    await cb.answer("Отменено. Выберите действие:")
 
 
 
