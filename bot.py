@@ -913,22 +913,23 @@ def format_order_review(order: Order) -> str:
 def format_order_admin(order: Order) -> str:
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
+        sess.refresh(order)  # Refresh to load latest
         u = get_user_by_id(sess, order.user_id)
         full_name = u.full_name if u else "Неизвестно"
-    pvz_code = order.extra_data.get("pvz_code", "—")
-    gift = order.extra_data.get("gift_message", "").strip()
-    logger.info(f"В админке для #{order.id}: extra_data = {order.extra_data}, gift = {gift}")
-    gift_text = f"Послание в подарок:\n{gift or '—'}\n\n"
-    return (
-        f"Заказ #{order.id}\n"
-        f"Пользователь: {full_name} ({order.user_id})\n"
-        f"Статус: {order.status}\n"
-        f"ПВЗ код: {pvz_code}\n"
-        f"Адрес: {order.address or '—'}\n"
-        f"Трек: {order.track or '—'}\n"
-        f"Тип оплаты: {order.payment_kind or '—'}\n\n"
-        f"{gift_text}"
-    )
+        pvz_code = order.extra_data.get("pvz_code", "—")
+        gift = order.extra_data.get("gift_message", "").strip()
+        logger.info(f"В админке для #{order.id}: extra_data = {order.extra_data}, gift = {gift}")
+        gift_text = f"Послание в подарок:\n{gift or '—'}\n\n"
+        return (
+            f"Заказ #{order.id}\n"
+            f"Пользователь: {full_name} ({order.user_id})\n"
+            f"Статус: {order.status}\n"
+            f"ПВЗ код: {pvz_code}\n"
+            f"Адрес: {order.address or '—'}\n"
+            f"Трек: {order.track or '—'}\n"
+            f"Тип оплаты: {order.payment_kind or '—'}\n\n"
+            f"{gift_text}"
+        )
 
 
 def format_client_order_info(order: Order) -> str:
@@ -1222,15 +1223,19 @@ async def cb_practices(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
-        sess.commit()
-    if not user.is_authorized:
-        await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
-        await cb.answer(); return
-    if not user.practices:
-        await edit_or_send(cb.message, "У вас нет практик.\nАктивируйте код или закажите коробочку.", kb_empty_practices())
-        await cb.answer(); return
-    await edit_or_send(cb.message, "Твои практики:", kb_practices_list(user.practices))
-    await cb.answer()
+
+        if not user.is_authorized:
+            await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
+            await cb.answer()
+            return
+
+        if not user.practices:
+            await edit_or_send(cb.message, "У вас нет практик.\nАктивируйте код или закажите коробочку.", kb_empty_practices())
+            await cb.answer()
+            return
+
+        await edit_or_send(cb.message, "Твои практики:", kb_practices_list(user.practices))
+        await cb.answer()
 
 @r.callback_query(F.data.startswith("practice:"))
 async def cb_open_practice(cb: CallbackQuery):
@@ -1558,27 +1563,20 @@ async def cb_order_status(cb: CallbackQuery):
 
 @r.callback_query(F.data == CallbackData.ORDERS.value)
 async def cb_orders_list(cb: CallbackQuery):
-    try:
-        engine = make_engine(Config.DB_PATH)
-        with Session(engine) as sess:
-            user = get_user_by_id(sess, cb.from_user.id)
-            if not user:
-                await cb.answer("Ошибка доступа", show_alert=True)
-                return
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
 
-            if not user.is_authorized:
-                await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
-                await cb.answer()
-                return
+        if not user.is_authorized:
+            await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
+            await cb.answer()
+            return
 
-            orders = get_user_orders_db(sess, cb.from_user.id)
-            ids = [o.id for o in orders]
-
-            sess.commit()
-    except Exception as e:
-        logger.error(f"DB error in cb_orders_list: {e}")
-        await cb.answer("Временная ошибка сервера. Попробуйте позже.", show_alert=True)
-        return
+        orders = get_user_orders_db(sess, cb.from_user.id)
+        ids = [o.id for o in orders]
 
     if not ids:
         await edit_or_send(
@@ -1849,7 +1847,6 @@ async def cb_pvz_backlist(cb: CallbackQuery):
 
 @r.callback_query(lambda c: (c.data or "").startswith("pvz_sel:"))
 async def cb_pvz_select(cb: CallbackQuery):
-    # ===== 1. БЕЗОПАСНО парсим callback_data =====
     try:
         parts = (cb.data or "").split(":")
         if len(parts) != 3:
@@ -1864,31 +1861,26 @@ async def cb_pvz_select(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
 
     with Session(engine) as sess:
-        # ===== 2. Загружаем пользователя =====
         user = get_user_by_id(sess, cb.from_user.id)
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-        # ===== 3. Проверка списка ПВЗ =====
         if not user.temp_pvz_list or not (0 <= idx < len(user.temp_pvz_list)):
             await cb.answer("Список ПВЗ устарел — введите адрес заново", show_alert=True)
             return
 
         pvz = user.temp_pvz_list[idx]
 
-        # ===== 4. Защита от устаревших кнопок =====
         current_code = pvz.get("code")
         if str(current_code) != str(old_code):
             await cb.answer("Эта кнопка устарела — выберите ПВЗ заново", show_alert=True)
             return
 
-        # ===== 5. Защита от повторного выбора =====
         if user.pvz_for_order_id is not None:
             await cb.answer("ПВЗ уже выбран. Продолжайте оформление.", show_alert=True)
             return
 
-        # ===== 6. Парсим код ПВЗ =====
         raw_code = pvz.get("code")
         if isinstance(raw_code, str) and raw_code.startswith("MSK"):
             real_code = int(raw_code.replace("MSK", ""))
@@ -1900,14 +1892,12 @@ async def cb_pvz_select(cb: CallbackQuery):
             await cb.answer("Ошибка кода ПВЗ", show_alert=True)
             return
 
-        # ===== 7. city_code с fallback =====
         city_code = pvz.get("location", {}).get("code") or Config.CDEK_FROM_CITY_CODE
         city_code = str(city_code)
 
         full_address = pvz["location"]["address_full"]
         work_time = pvz.get("work_time") or "Пн–Пт 10:00–20:00, Сб–Вс 10:00–18:00"
 
-        # ===== 8. Сохраняем выбранный ПВЗ =====
         user.temp_selected_pvz = {
             "code": real_code,
             "city_code": city_code,
@@ -1915,8 +1905,8 @@ async def cb_pvz_select(cb: CallbackQuery):
             "work_time": work_time
         }
 
-        # ===== 9. Считаем доставку =====
         await cb.message.answer("Считаю стоимость доставки…")
+
         delivery_info = await calculate_cdek_delivery_cost(city_code)
 
         delivery_cost = delivery_info["cost"] if delivery_info else 590
@@ -1929,7 +1919,6 @@ async def cb_pvz_select(cb: CallbackQuery):
         total = Config.PRICE_RUB + delivery_cost
         prepay = (total * Config.PREPAY_PERCENT + 99) // 100
 
-        # ===== 10. Создаём заказ =====
         order = create_order_db(
             sess,
             user_id=cb.from_user.id,
@@ -1949,14 +1938,13 @@ async def cb_pvz_select(cb: CallbackQuery):
 
         order_id = order.id
 
-        # ===== 11. Фиксируем, что заказ начат =====
         user.pvz_for_order_id = order_id
         user.awaiting_gift_message = False
-        user.temp_gift_order_id = None
+        user.temp_gift_order_id = order_id
 
         sess.commit()
 
-    # ===== 12. UI (вне сессии) =====
+    # UI outside
     await edit_or_send(
         cb.message,
         f"<b>ПВЗ сохранён!</b>\n\n"
@@ -1969,8 +1957,7 @@ async def cb_pvz_select(cb: CallbackQuery):
 
     await cb.answer("Готово!")
 
-    user.temp_gift_order_id = order_id
-
+    # Gift question
     await cb.message.answer(
         "Хотите добавить личное послание в подарок получателю?\n"
         "(Текст будет вложен в коробочку)",
@@ -2283,6 +2270,68 @@ async def on_message_router(message: Message):
 
             await message.answer("💌 Послание сохранено!")
             await send_payment_keyboard(message, order)
+            return
+
+
+        if user.awaiting_manual_pvz:
+            manual_address = text.strip()
+            if not manual_address:
+                await message.answer("Введите адрес или код ПВЗ.")
+                return
+
+            # Fallback
+            real_code = 0  # Placeholder
+            city_code = "44"
+            full_address = manual_address
+            work_time = "Не указано"
+
+            delivery_cost = 590  # Fallback
+            period_text = "3–7"
+
+            total = Config.PRICE_RUB + delivery_cost
+            prepay = (total * Config.PREPAY_PERCENT + 99) // 100
+
+            order = create_order_db(
+                sess,
+                user_id=message.from_user.id,
+                product_id=1,
+                status=OrderStatus.NEW.value,
+                shipping_method="cdek_pvz",
+                address=full_address,
+                total_price_kop=total * 100,
+                delivery_cost_kop=delivery_cost * 100,
+                extra_data={
+                    "pvz_code": real_code,
+                    "city_code": city_code,
+                    "delivery_cost": delivery_cost,
+                    "delivery_period": period_text,
+                    "manual_pvz": True,
+                    "manual_address": manual_address
+                }
+            )
+
+            order_id = order.id
+
+            user.awaiting_manual_pvz = False
+            user.awaiting_pvz_address = False
+            user.temp_pvz_list = None
+            user.pvz_for_order_id = order_id
+            user.temp_gift_order_id = order_id
+            sess.commit()
+
+            await message.answer(
+                f"Введённый вами вручную адрес: {manual_address}\n"
+                f"Стоимость доставки будет считаться уже после оплаты (ориентировочно {delivery_cost} ₽, ≈ {period_text} дн.)\n"
+                f"Итого (ориентировочно): {total} ₽"
+            )
+
+            await message.answer(
+                "Хотите добавить личное послание в подарок получателю?",
+                reply_markup=create_inline_keyboard([
+                    [{"text": "Да, добавить", "callback_data": "gift:yes"}],
+                    [{"text": "Нет, без послания", "callback_data": "gift:no"}],
+                ])
+            )
             return
 
 
