@@ -2021,8 +2021,8 @@ async def cb_gift_no(cb: CallbackQuery):
         order_id = user.temp_gift_order_id
 
         if not order_id:
-            await cb.message.edit_text("Ок, без послания. Переходим к оплате...")
-            await cb.answer()
+            # Просто подтверждаем и выходим
+            await cb.answer("Ок, без послания")
             return
 
         order = sess.get(Order, order_id)
@@ -2038,15 +2038,13 @@ async def cb_gift_no(cb: CallbackQuery):
         user.temp_gift_order_id = None
         sess.commit()
 
+    await cb.message.answer("Ок, без послания. Переходим к оплате...")
+
+    # Перечитываем заказ и отправляем клавиатуру оплаты
     if order_id:
         order = get_order_by_id(order_id, cb.from_user.id)
         if order:
-            await cb.message.edit_text("Ок, без послания. Переходим к оплате...")
             await send_payment_keyboard(cb.message, order)
-        else:
-            await cb.message.edit_text("Ошибка: заказ не найден.")
-    else:
-        await cb.message.edit_text("Ок, без послания.")
 
     await cb.answer()
 
@@ -2329,9 +2327,20 @@ async def on_message_router(message: Message):
 
             await message.answer("Ищу ближайшие ПВЗ СДЭК...")
 
-            pvz_list = await find_best_pvz(text, city="Москва")
+            pvz_list = await find_best_pvz(text)
             if not pvz_list:
-                await message.answer("Не нашёл ПВЗ. Попробуйте другой адрес.")
+                await message.answer(
+                    "Не нашёл ПВЗ по этому адресу 😔\n\n"
+                    "Попробуйте:\n"
+                    "• Указать только улицу и номер дома\n"
+                    "• Указать город (например: Звенигород, квартал Маяковского 6)\n"
+                    "• Написать короче или по-другому\n\n"
+                    "Просто введите новый вариант адреса - я поищу заново.",
+                    reply_markup=create_inline_keyboard([
+                        [{"text": "Ввести адрес ПВЗ вручную в поддержку", "callback_data": "pvz_manual"}],
+                        [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
+                    ])
+                )
                 return
 
             user.temp_pvz_list = pvz_list
