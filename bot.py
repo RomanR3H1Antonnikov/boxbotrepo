@@ -533,6 +533,20 @@ def validate_address(address: str) -> tuple[bool, str]:
         return False, "Адрес слишком короткий. Укажите улицу и номер дома."
     return True, "Адрес валиден."
 
+
+def reset_states(user):
+    user.awaiting_auth = False
+    user.awaiting_gift_message = False
+    user.awaiting_pvz_address = False
+    user.awaiting_manual_pvz = False
+    user.awaiting_manual_track = False
+    user.pvz_for_order_id = None
+    user.temp_gift_order_id = None
+    user.temp_pvz_list = None
+    user.temp_selected_pvz = None
+    user.temp_order_id_for_track = None
+
+
 # ======== ADMIN HELPERS ========
 def get_order_admin(order_id: int) -> Optional[Order]:
     engine = make_engine(Config.DB_PATH)
@@ -903,6 +917,7 @@ def format_order_admin(order: Order) -> str:
         full_name = u.full_name if u else "Неизвестно"
     pvz_code = order.extra_data.get("pvz_code", "—")
     gift = order.extra_data.get("gift_message", "").strip()
+    logger.info(f"В админке для #{order.id}: extra_data = {order.extra_data}, gift = {gift}")
     gift_text = f"Послание в подарок:\n{gift or '—'}\n\n"
     return (
         f"Заказ #{order.id}\n"
@@ -1020,7 +1035,7 @@ async def cmd_menu(message: Message):
     with Session(engine) as sess:
         user = get_user_by_id(sess, message.from_user.id)
         if user:
-            user.pvz_for_order_id = None
+            reset_states(user)
             sess.commit()
     await message.answer("Выбери действие:", reply_markup=kb_main())
 
@@ -1033,6 +1048,12 @@ async def cmd_admin_panel(message: Message):
 @r.callback_query(F.data == CallbackData.MENU.value)
 async def cb_menu(cb: CallbackQuery):
     logger.info(f"Menu callback: user_id={cb.from_user.id}, data={cb.data}")
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if user:
+            reset_states(user)
+            sess.commit()
     await edit_or_send(cb.message, "Выбери действие:", kb_main())
     await cb.answer()
 
@@ -1479,9 +1500,9 @@ async def cb_pay(cb: CallbackQuery):
 
             with Session(engine) as sess:
                 user = get_user_by_id(sess, cb.from_user.id)
-                if user and user.temp_gift_order_id == oid:
-                    user.temp_gift_order_id = None
-                    sess.commit()
+                if user:
+                    reset_states(user)
+                sess.commit()
 
             # Создание заказа в СДЭК — ВНЕ сессии
             if need_cdek_create:
@@ -2015,11 +2036,10 @@ async def cb_gift_no(cb: CallbackQuery):
             return
 
         order_id = user.temp_gift_order_id
-        order = None
-        if order_id:
-            order = sess.get(Order, order_id)
-            if not order or order.user_id != cb.from_user.id:
-                order = None
+        order = sess.get(Order, order_id) if order_id else None
+
+        if order and order.user_id != cb.from_user.id:
+            order = None
 
         user.awaiting_gift_message = False
         sess.commit()
@@ -2030,7 +2050,7 @@ async def cb_gift_no(cb: CallbackQuery):
         await send_payment_keyboard(cb.message, order)
     else:
         await cb.message.answer(
-            "Не удалось найти активный заказ. Начните оформление заново.",
+            "Заказ не найден. Начните оформление заново.",
             reply_markup=kb_main()
         )
 
