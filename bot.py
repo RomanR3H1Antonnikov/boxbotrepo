@@ -1091,14 +1091,6 @@ async def cb_gallery(cb: CallbackQuery):
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         sess.refresh(user)
-        if not user:
-            await cb.answer("Ошибка доступа", show_alert=True)
-            return
-
-        if not user.is_authorized:
-            await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
-            await cb.answer()
-            return
 
         if user.gallery_viewed:
             await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery())
@@ -2322,7 +2314,6 @@ async def on_message_router(message: Message):
                 user.extra_data = {}
 
             user.extra_data["pvz_query"] = text
-            user.awaiting_pvz_address = False
             sess.commit()
 
             await message.answer("Ищу ближайшие ПВЗ СДЭК...")
