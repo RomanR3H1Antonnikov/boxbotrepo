@@ -913,13 +913,13 @@ def format_order_review(order: Order) -> str:
 def format_order_admin(order: Order) -> str:
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
-        sess.refresh(order)  # Refresh to load latest
+        sess.refresh(order)
         u = get_user_by_id(sess, order.user_id)
         full_name = u.full_name if u else "Неизвестно"
-        pvz_code = order.extra_data.get("pvz_code", "—")
-        gift = order.extra_data.get("gift_message", "").strip()
-        logger.info(f"В админке для #{order.id}: extra_data = {order.extra_data}, gift = {gift}")
-        gift_text = f"Послание в подарок:\n{gift or '—'}\n\n"
+        # FIX: защита от None
+        pvz_code = (order.extra_data or {}).get("pvz_code", "—")
+        gift = (order.extra_data or {}).get("gift_message", "").strip()
+        gift_text = f"Послание в подарок:\n{gift or '—'}\n\n"  # всегда показываем поле
         return (
             f"Заказ #{order.id}\n"
             f"Пользователь: {full_name} ({order.user_id})\n"
@@ -933,7 +933,6 @@ def format_order_admin(order: Order) -> str:
 
 
 def format_client_order_info(order: Order) -> str:
-    # Русские названия статусов
     status_map = {
         OrderStatus.NEW.value: "🆕 Новый заказ",
         OrderStatus.PREPAID.value: "✅ Предоплачен (30%)",
@@ -954,8 +953,8 @@ def format_client_order_info(order: Order) -> str:
     ]
 
     # Доставка
-    delivery_cost = order.extra_data.get("delivery_cost", 0)
-    period = order.extra_data.get("delivery_period", "3–7")
+    delivery_cost = (order.extra_data or {}).get("delivery_cost", 0)
+    period = (order.extra_data or {}).get("delivery_period", "3–7")
     lines += [
         "",
         "🚚 <b>Доставка:</b> ПВЗ СДЭК",
@@ -964,14 +963,13 @@ def format_client_order_info(order: Order) -> str:
         f"📍 <b>Адрес ПВЗ:</b>\n{order.address}",
     ]
 
-    # Послание
-    gift = order.extra_data.get("gift_message")
-    if gift:
-        lines += [
-            "",
-            "💌 <b>Личное послание в подарок:</b>",
-            f"<i>{gift}</i>",
-        ]
+    # FIX: всегда показываем послание (даже если его нет)
+    gift = (order.extra_data or {}).get("gift_message")
+    lines += [
+        "",
+        "💌 <b>Личное послание в подарок:</b>",
+        f"<i>{gift if gift else '—'}</i>",
+    ]
 
     # Оплата — подробнее
     total = order.total_price
@@ -1709,8 +1707,8 @@ async def cb_admin_order_details(cb: CallbackQuery):
         await cb.answer()
     except Exception as e:
         logger.error(f"Admin order details error: {e}")
-        await notify_admin(f"❌ Ошибка просмотра заказа #{oid}")
-        await cb.answer("Ошибка", show_alert=True)
+        await notify_admin(f"❌ Ошибка просмотра заказа #{oid if 'oid' in locals() else 'неизвестный'}")
+        await cb.answer("Ошибка просмотра заказа", show_alert=True)
 
 @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_READY.value))
 async def cb_admin_set_ready(cb: CallbackQuery):
@@ -1978,36 +1976,24 @@ async def cb_gift_yes(cb: CallbackQuery):
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-        # ищем последний активный заказ
+        # FIX: ищем последний NEW-заказ пользователя
         orders = get_user_orders_db(sess, cb.from_user.id)
-        order = next(
-            (o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value),
-            None
-        )
+        order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
 
         if not order:
-            user.awaiting_gift_message = False
-            user.temp_gift_order_id = None
-            sess.commit()
-
             await cb.answer("Нет активного заказа", show_alert=True)
             return
 
-        # защита от повторного нажатия
-        if user.awaiting_gift_message and user.temp_gift_order_id == order.id:
+        if user.awaiting_gift_message:
             await cb.answer("Вы уже вводите послание", show_alert=True)
             return
 
-        # фиксируем состояние
         user.awaiting_gift_message = True
-        user.temp_gift_order_id = order.id
         sess.commit()
 
     await cb.message.edit_text(
         "✍️ Напишите текст послания (до 300 символов):",
-        reply_markup=create_inline_keyboard([
-            [{"text": "Отмена", "callback_data": "gift:cancel"}]
-        ])
+        reply_markup=create_inline_keyboard([[{"text": "Отмена", "callback_data": "gift:cancel"}]])
     )
     await cb.answer()
 
@@ -2022,11 +2008,9 @@ async def cb_gift_no(cb: CallbackQuery):
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-        order_id = user.temp_gift_order_id
-        order = sess.get(Order, order_id) if order_id else None
-
-        if order and order.user_id != cb.from_user.id:
-            order = None
+        # FIX: ищем последний NEW-заказ (как и в gift:yes)
+        orders = get_user_orders_db(sess, cb.from_user.id)
+        order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
 
         user.awaiting_gift_message = False
         sess.commit()
@@ -2037,7 +2021,7 @@ async def cb_gift_no(cb: CallbackQuery):
         await send_payment_keyboard(cb.message, order)
     else:
         await cb.message.answer(
-            "Заказ не найден. Начните оформление заново.",
+            "Заказ не найден или уже оплачен. Начните оформление заново.",
             reply_markup=kb_main()
         )
 
@@ -2225,25 +2209,14 @@ async def on_message_router(message: Message):
 
         # ===== 1. ПОДАРОЧНОЕ ПОСЛАНИЕ =====
         if user.awaiting_gift_message:
-            order_id = user.temp_gift_order_id
+            # FIX: ищем последний NEW-заказ (на случай, если temp_gift_order_id потерялся)
+            orders = get_user_orders_db(sess, message.from_user.id)
+            order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
 
-            if not order_id:
+            if not order:
                 user.awaiting_gift_message = False
                 sess.commit()
-                await message.answer("Послание больше нельзя добавить.", reply_markup=kb_main())
-                return
-
-            order = sess.get(Order, order_id)
-
-            if not order or order.user_id != user.telegram_id or order.status != OrderStatus.NEW.value:
-                user.awaiting_gift_message = False
-                user.temp_gift_order_id = None
-                sess.commit()
-
-                await message.answer(
-                    "Послание больше нельзя добавить — заказ недоступен.",
-                    reply_markup=kb_main()
-                )
+                await message.answer("Активный заказ не найден. Послание добавить нельзя.", reply_markup=kb_main())
                 return
 
             if not text:
@@ -2254,19 +2227,12 @@ async def on_message_router(message: Message):
                 await message.answer("Максимум 300 символов.")
                 return
 
-            logger.info(f"Перед сохранением: order.extra_data = {order.extra_data}")
-
             if order.extra_data is None:
                 order.extra_data = {}
             order.extra_data["gift_message"] = text.strip()
 
-            logger.info(f"После сохранения: order.extra_data = {order.extra_data}")
-
             user.awaiting_gift_message = False
-            user.temp_gift_order_id = None
             sess.commit()
-
-            logger.info(f"Коммит завершён для заказа #{order.id}")
 
             await message.answer("💌 Послание сохранено!")
             await send_payment_keyboard(message, order)
