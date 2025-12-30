@@ -557,13 +557,15 @@ def reset_states(user):
     user.temp_pvz_list = None
     user.temp_selected_pvz = None
     user.temp_order_id_for_track = None
+
+    # FIX: Abandon unfinished NEW orders
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         orders = get_user_orders_db(sess, user.telegram_id)
         for o in orders:
             if o.status == OrderStatus.NEW.value:
+                o = sess.merge(o)
                 o.status = OrderStatus.ABANDONED.value
-                sess.merge(o)
         sess.commit()
 
 
@@ -931,25 +933,21 @@ def format_order_review(order: Order) -> str:
     )
 
 def format_order_admin(order: Order) -> str:
-    engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
-        sess.refresh(order)
-        u = get_user_by_id(sess, order.user_id)
-        full_name = u.full_name if u else "Неизвестно"
-        # FIX: защита от None
-        pvz_code = (order.extra_data or {}).get("pvz_code", "—")
-        gift = (order.extra_data or {}).get("gift_message", "").strip()
-        gift_text = f"Послание в подарок:\n{gift or '—'}\n\n"  # всегда показываем поле
-        return (
-            f"Заказ #{order.id}\n"
-            f"Пользователь: {full_name} ({order.user_id})\n"
-            f"Статус: {order.status}\n"
-            f"ПВЗ код: {pvz_code}\n"
-            f"Адрес: {order.address or '—'}\n"
-            f"Трек: {order.track or '—'}\n"
-            f"Тип оплаты: {order.payment_kind or '—'}\n\n"
-            f"{gift_text}"
-        )
+    # Assume order attached (from caller sess)
+    full_name = order.user.full_name if order.user else "Неизвестно"
+    pvz_code = (order.extra_data or {}).get("pvz_code", "—")
+    gift = (order.extra_data or {}).get("gift_message", "").strip()
+    gift_text = f"Послание в подарок:\n{gift or '—'}\n\n"
+    return (
+        f"Заказ #{order.id}\n"
+        f"Пользователь: {full_name} ({order.user_id})\n"
+        f"Статус: {order.status}\n"
+        f"ПВЗ код: {pvz_code}\n"
+        f"Адрес: {order.address or '—'}\n"
+        f"Трек: {order.track or '—'}\n"
+        f"Тип оплаты: {order.payment_kind or '—'}\n\n"
+        f"{gift_text}"
+    )
 
 
 def format_client_order_info(order: Order) -> str:
@@ -1313,6 +1311,13 @@ async def cb_checkout_start(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
+        # Abandon any unfinished
+        orders = get_user_orders_db(sess, cb.from_user.id)
+        for o in orders:
+            if o.status == OrderStatus.NEW.value:
+                o = sess.merge(o)
+                o.status = OrderStatus.ABANDONED.value
+        sess.commit()
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
@@ -1718,25 +1723,32 @@ async def cb_admin_order_details(cb: CallbackQuery):
     logger.info(f"Order details callback: user_id={cb.from_user.id}, data={cb.data}")
     try:
         oid = int(cb.data.split(":")[2])
-        # FIX: Use session for get and refresh
+
         engine = make_engine(Config.DB_PATH)
         with Session(engine) as sess:
             order = sess.get(Order, oid)
             if not order:
                 await cb.answer("Заказ не найден", show_alert=True)
                 return
-            sess.refresh(order)  # FIX: Ensure fresh/attached
+            # FIX: Load user relationship
+            sess.expunge(order)  # Detach to avoid issues
+            order = sess.merge(order, load=True)
+            sess.refresh(order)
+            if order.user:
+                sess.refresh(order.user)  # Load user
 
         if not await is_admin(cb):
-            logger.info("Admin access denied")
             await cb.answer("Доступ запрещён", show_alert=True)
             return
-        await edit_or_send(cb.message, format_order_admin(order), kb_admin_order_actions(order))
+
+        text = format_order_admin(order)
+        await edit_or_send(cb.message, text, kb_admin_order_actions(order))
         await cb.answer()
     except Exception as e:
         logger.error(f"Admin order details error: {e}")
         await notify_admin(f"❌ Ошибка просмотра заказа #{oid if 'oid' in locals() else 'неизвестный'}")
         await cb.answer("Ошибка просмотра заказа", show_alert=True)
+
 
 @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_READY.value))
 async def cb_admin_set_ready(cb: CallbackQuery):
@@ -2008,6 +2020,12 @@ async def cb_gift_yes(cb: CallbackQuery):
         orders = get_user_orders_db(sess, cb.from_user.id)
         order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
 
+        if not order or order.status != OrderStatus.NEW.value:
+            await cb.answer("Заказ устарел. Начните оформление заново.", show_alert=True)
+            reset_states(user)
+            sess.commit()
+            return
+        
         if not order:
             await cb.answer("Нет активного заказа", show_alert=True)
             return
