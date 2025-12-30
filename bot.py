@@ -557,6 +557,14 @@ def reset_states(user):
     user.temp_pvz_list = None
     user.temp_selected_pvz = None
     user.temp_order_id_for_track = None
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        orders = get_user_orders_db(sess, user.telegram_id)
+        for o in orders:
+            if o.status == OrderStatus.NEW.value:
+                o.status = OrderStatus.ABANDONED.value
+                sess.merge(o)
+        sess.commit()
 
 
 # ======== ADMIN HELPERS ========
@@ -1047,6 +1055,7 @@ async def cmd_menu(message: Message):
         user = get_user_by_id(sess, message.from_user.id)
         if user:
             reset_states(user)
+            await message.answer("Все текущие действия отменены. Если был незавершённый заказ - он отменён.")
             sess.commit()
     await message.answer("Выбери действие:", reply_markup=kb_main())
 
@@ -1064,6 +1073,8 @@ async def cb_menu(cb: CallbackQuery):
         user = get_user_by_id(sess, cb.from_user.id)
         if user:
             reset_states(user)
+            # After reset_states(user)
+            await cb.message.answer("Все текущие действия отменены. Если был незавершённый заказ - он отменён.")
             sess.commit()
     await edit_or_send(cb.message, "Выбери действие:", kb_main())
     await cb.answer()
@@ -1702,6 +1713,7 @@ async def cb_admin_orders_archived(cb: CallbackQuery):
         await edit_or_send(cb.message, "Архив заказов:", kb_admin_orders(orders))
     await cb.answer()
 
+@r.callback_query(F.data.startswith("admin:order:"))
 async def cb_admin_order_details(cb: CallbackQuery):
     logger.info(f"Order details callback: user_id={cb.from_user.id}, data={cb.data}")
     try:
@@ -2027,10 +2039,8 @@ async def cb_gift_no(cb: CallbackQuery):
         orders = get_user_orders_db(sess, cb.from_user.id)
         order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
 
-        # FIX: Attach detached order
         if order:
-            order = sess.merge(order)
-            # Set explicit "Без послания" if no message
+            order = sess.merge(order)  # Attach
             if order.extra_data is None:
                 order.extra_data = {}
             if "gift_message" not in order.extra_data:
@@ -2040,9 +2050,12 @@ async def cb_gift_no(cb: CallbackQuery):
         user.awaiting_gift_message = False
         sess.commit()
 
+        # Now check status INSIDE session (after merge)
+        has_valid_order = order and order.status == OrderStatus.NEW.value
+
     await cb.message.answer("Ок, без послания. Переходим к оплате...")
 
-    if order and order.status == OrderStatus.NEW.value:
+    if has_valid_order:
         await send_payment_keyboard(cb.message, order)
     else:
         await cb.message.answer(
