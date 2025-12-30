@@ -8,6 +8,7 @@ from typing import Optional, Dict, List
 from enum import Enum
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 from db.init_db import init_db, seed_data
 from db.repo import (
     make_engine, get_or_create_user,
@@ -379,6 +380,9 @@ async def create_cdek_order(order_id: int) -> bool:
             logger.error(f"Заказ #{order_id} не найден")
             return False
 
+        # FIX: Refresh to ensure attached
+        sess.refresh(order)
+
         pvz_code = order.extra_data.get("pvz_code")
         if not pvz_code:
             logger.error(f"Нет pvz_code для заказа #{order.id}")
@@ -494,8 +498,14 @@ async def create_cdek_order(order_id: int) -> bool:
         if not order:
             return False
 
+            sess.refresh(order)
+
+            if order.extra_data is None:
+                order.extra_data = {}
+
         order.extra_data["cdek_uuid"] = uuid
-        order.track = uuid  # временно используем UUID как трек
+        flag_modified(order, "extra_data")  # FIX: Mark modified
+        order.track = uuid
         order.status = OrderStatus.SHIPPED.value
         sess.commit()
 
@@ -1690,7 +1700,6 @@ async def cb_admin_orders_archived(cb: CallbackQuery):
         await edit_or_send(cb.message, "Архив заказов:", kb_admin_orders(orders))
     await cb.answer()
 
-@r.callback_query(F.data.startswith("admin:order:"))
 async def cb_admin_order_details(cb: CallbackQuery):
     logger.info(f"Order details callback: user_id={cb.from_user.id}, data={cb.data}")
     try:
@@ -1699,6 +1708,13 @@ async def cb_admin_order_details(cb: CallbackQuery):
         if not order:
             await cb.answer("Заказ не найден", show_alert=True)
             return
+
+        # FIX: Open session and refresh to attach
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            order = sess.merge(order)
+            sess.refresh(order)
+
         if not await is_admin(cb):
             logger.info("Admin access denied")
             await cb.answer("Доступ запрещён", show_alert=True)
@@ -2008,9 +2024,12 @@ async def cb_gift_no(cb: CallbackQuery):
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-        # FIX: ищем последний NEW-заказ (как и в gift:yes)
         orders = get_user_orders_db(sess, cb.from_user.id)
         order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
+
+        # FIX: Attach detached order to current session
+        if order:
+            order = sess.merge(order)
 
         user.awaiting_gift_message = False
         sess.commit()
@@ -2209,7 +2228,6 @@ async def on_message_router(message: Message):
 
         # ===== 1. ПОДАРОЧНОЕ ПОСЛАНИЕ =====
         if user.awaiting_gift_message:
-            # FIX: ищем последний NEW-заказ (на случай, если temp_gift_order_id потерялся)
             orders = get_user_orders_db(sess, message.from_user.id)
             order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
 
@@ -2230,6 +2248,8 @@ async def on_message_router(message: Message):
             if order.extra_data is None:
                 order.extra_data = {}
             order.extra_data["gift_message"] = text.strip()
+            # FIX: Mark JSON as modified to commit changes
+            flag_modified(order, "extra_data")
 
             user.awaiting_gift_message = False
             sess.commit()
