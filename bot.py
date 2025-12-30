@@ -493,15 +493,17 @@ async def create_cdek_order(order_id: int) -> bool:
         return False
 
     # ================== 4. СОХРАНЯЕМ UUID В БД ==================
+    # FIX: New session for write
     with Session(engine) as sess:
         order = sess.get(Order, order_id)
         if not order:
             return False
 
-            sess.refresh(order)
+        # Refresh/attach
+        sess.refresh(order)
 
-            if order.extra_data is None:
-                order.extra_data = {}
+        if order.extra_data is None:
+            order.extra_data = {}
 
         order.extra_data["cdek_uuid"] = uuid
         flag_modified(order, "extra_data")  # FIX: Mark modified
@@ -1704,16 +1706,14 @@ async def cb_admin_order_details(cb: CallbackQuery):
     logger.info(f"Order details callback: user_id={cb.from_user.id}, data={cb.data}")
     try:
         oid = int(cb.data.split(":")[2])
-        order = get_order_admin(oid)
-        if not order:
-            await cb.answer("Заказ не найден", show_alert=True)
-            return
-
-        # FIX: Open session and refresh to attach
+        # FIX: Use session for get and refresh
         engine = make_engine(Config.DB_PATH)
         with Session(engine) as sess:
-            order = sess.merge(order)
-            sess.refresh(order)
+            order = sess.get(Order, oid)
+            if not order:
+                await cb.answer("Заказ не найден", show_alert=True)
+                return
+            sess.refresh(order)  # FIX: Ensure fresh/attached
 
         if not await is_admin(cb):
             logger.info("Admin access denied")
@@ -2027,9 +2027,15 @@ async def cb_gift_no(cb: CallbackQuery):
         orders = get_user_orders_db(sess, cb.from_user.id)
         order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
 
-        # FIX: Attach detached order to current session
+        # FIX: Attach detached order
         if order:
             order = sess.merge(order)
+            # Set explicit "Без послания" if no message
+            if order.extra_data is None:
+                order.extra_data = {}
+            if "gift_message" not in order.extra_data:
+                order.extra_data["gift_message"] = "Без послания"
+            flag_modified(order, "extra_data")
 
         user.awaiting_gift_message = False
         sess.commit()
@@ -2231,6 +2237,10 @@ async def on_message_router(message: Message):
             orders = get_user_orders_db(sess, message.from_user.id)
             order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
 
+            # FIX: Attach detached order
+            if order:
+                order = sess.merge(order)
+
             if not order:
                 user.awaiting_gift_message = False
                 sess.commit()
@@ -2247,8 +2257,9 @@ async def on_message_router(message: Message):
 
             if order.extra_data is None:
                 order.extra_data = {}
+
             order.extra_data["gift_message"] = text.strip()
-            # FIX: Mark JSON as modified to commit changes
+            # FIX: Mark modified for commit
             flag_modified(order, "extra_data")
 
             user.awaiting_gift_message = False
