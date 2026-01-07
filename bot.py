@@ -346,6 +346,8 @@ class Config:
         "Екатеринбург": "195",
         "Новосибирск": "157",
         "Казань": "138",
+        "Пермь": "248",
+        "Звенигород": "964"
     }
 
 # ========== ADMIN ==========
@@ -2741,32 +2743,26 @@ def _normalize_address_variants(address_query: str) -> List[str]:
 
 
 def _make_exact_matcher(address_query: str):
-    """
-    Гибкий матчер: ищет совпадение улицы и номера дома
-    Игнорирует: город, индекс, "ул", "д", "к", пробелы, регистр
-    """
     query = address_query.lower().strip()
 
-    # Убираем типы улиц
-    for kw in STREET_KEYWORDS:
-        query = query.replace(kw.lower(), "")
+    # Если выглядит как код ПВЗ (буквы+цифры, e.g. MSK123, YEKB282, PRM53)
+    if re.match(r'^[a-zA-Z]+\d+$', query.upper()):
+        code = query.upper()
+        def matcher(addr: str) -> bool:
+            return code == (p.get('code') or '').upper()
+        logger.info(f"Matcher: код ПВЗ='{code}'")
+        return matcher
 
-    # Убираем "москва", "г ", "город " и т.п.
-    query = re.sub(r"\b(москва|г\s*\.?|город)\b", "", query, flags=re.IGNORECASE)
+    # Убираем типы улиц, "д.", "к.", "стр.", "лит.", "корп."
+    query = re.sub(r'\b(ул|улица|пр|проспект|пер|переулок|шоссе|бул|бульвар|пл|площадь|наб|набережная|тракт|аллея|д|к|стр|лит|корп|г|город)\b\.?', '', query, flags=re.IGNORECASE)
+    query = re.sub(r'\s+', ' ', query).strip()
 
-    # Находим номер дома (поддержка: 5А, 5а, 5/а, 5 к1, 5к.1, 5 к.1)
-    house_match = re.search(r"(\d+\s*[а-яА-Я]?)\s*[\/к]?\s*[а-яА-Я]?", query)
-    house = house_match.group(1).strip() if house_match else None
+    # Находим дом: \d+ (опционально буква/ /к/стр + цифра)
+    house_match = re.search(r'(\d+[а-яА-Я]?(\s*[\/кстрлиткорп]\s*\d*[а-яА-Я]?)?)', query)
+    house = house_match.group(0).strip() if house_match else None
 
-    # Улица - всё остальное
-    street = re.sub(r"\d+[а-яА-Я]?\s*[\/к]?\s*[а-яА-Я]?", "", query)
-    street = re.sub(r"[^\w\s]", " ", street)  # убираем запятые и т.д.
-    street = re.sub(r"\s+", " ", street).strip()
-
-    # Если улица пустая - берём первые слова
-    if not street:
-        words = [w for w in query.split() if not w[0].isdigit()]
-        street = " ".join(words[:2])
+    # Улица: всё до дома
+    street = query[:house_match.start()].strip() if house_match else query
 
     logger.info(f"Matcher: улица='{street}', дом='{house}'")
 
@@ -2775,19 +2771,20 @@ def _make_exact_matcher(address_query: str):
             return False
         a = addr.lower()
 
-        # Проверяем улицу
-        street_ok = street in a or any(word in a for word in street.split())
+        # Улица: содержит слова улицы
+        street_words = [w for w in street.split() if w]
+        street_ok = all(w in a for w in street_words) if street_words else True
 
-        # Проверяем дом
+        # Дом: гибко ищем (e.g. '7/1' как '7 к1', '124 к.1' как '124/1')
         house_ok = True
         if house:
-            # Ищем номер дома в разных форматах
+            h_norm = re.sub(r'[\/кстрлиткорп\.]', ' ', house).strip()
             patterns = [
-                rf"\b{re.escape(house)}\b",
-                rf"\b{house.replace(' ', '')}\b",
-                rf"{house}\s*[кк]\.?\s*\d+",
-                rf"{house}[\/]{house[-1:]}"
+                rf"\b{re.escape(house)}\b",  # точный
+                rf"\b{re.escape(h_norm)}\b",  # без символов
+                rf"\b\d+\s*{re.escape(house[-1])}\b" if house[-1].isalpha() else None  # 124 а
             ]
+            patterns = [p for p in patterns if p]
             house_ok = any(re.search(p, a) for p in patterns)
 
         return street_ok and house_ok
@@ -2825,6 +2822,7 @@ async def find_best_pvz(address_query: str, city: str = None, limit: int = 10) -
     # Получаем ВСЕ PVZ в городе (увеличили limit)
     pts = await get_cdek_pvz_list("", city_code=city_code, limit=1000)
     if not pts:
+        logger.warning(f"Нет ПВЗ в городе (code={city_code}) — возможно, тестовая среда")
         return []
 
     # Фильтруем локально по адресу (используя matcher)
