@@ -2637,6 +2637,7 @@ async def get_cdek_pvz_list(address_query: str, city_code: Optional[int] = None,
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
+        logger.info(f"Запрос ПВЗ: url={url}, params={params}")
         resp = await asyncio.to_thread(requests.get, url, params=params, headers=headers, timeout=15)
         if resp.status_code == 200:
             points = resp.json()
@@ -2797,10 +2798,12 @@ async def find_best_pvz(address_query: str, city: str = None, limit: int = 10) -
             city_code = int(Config.POPULAR_CITIES[possible_city])
         else:
             city_code = await get_cdek_city_code(possible_city)
+    logger.info(f"Определён city_code={city_code} для query='{address_query}'")
 
     if city_code is None:
         city_code = 44  # Fallback Москва, если город не указан/не найден
 
+    logger.info(f"Определён city_code={city_code} для query='{address_query}'")
     variants = _normalize_address_variants(address_query)
     logger.info(f"Варианты адреса для поиска ПВЗ: {variants}")
 
