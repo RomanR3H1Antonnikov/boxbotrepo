@@ -2598,7 +2598,29 @@ async def handle_admin_command(message: Message, text: str):
 
 # ========== НОВЫЕ ФУНКЦИИ СДЭК ==========
 
-async def get_cdek_pvz_list(address_query: str, city: str = None, limit: int = 10) -> List[dict]:
+async def get_cdek_city_code(city_name: str) -> Optional[int]:
+    token = await get_cdek_token()
+    if not token:
+        return None
+
+    url = "https://api.edu.cdek.ru/v2/location/cities"
+    params = {"city": city_name.strip()}
+
+    try:
+        r = await asyncio.to_thread(requests.get, url, params=params, headers={"Authorization": f"Bearer {token}"}, timeout=15)
+        if r.status_code == 200:
+            cities = r.json()
+            if cities:
+                logger.info(f"Город '{city_name}' → code {cities[0].get('code')}")
+                return cities[0].get("code")
+        else:
+            logger.warning(f"Ошибка поиска города: {r.status_code} {r.text}")
+    except Exception as e:
+        logger.error(f"Ошибка get_cdek_city_code: {e}")
+    return None
+
+
+async def get_cdek_pvz_list(address_query: str, city_code: Optional[int] = None, limit: int = 50) -> List[dict]:
     token = await get_cdek_token()
     if not token:
         logger.error("Нет токена для поиска ПВЗ")
@@ -2610,9 +2632,8 @@ async def get_cdek_pvz_list(address_query: str, city: str = None, limit: int = 1
         "type": "PVZ",
         "limit": limit
     }
-    if city:
-        params["city"] = city
-
+    if city_code is not None:
+        params["city_code"] = city_code
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
@@ -2768,13 +2789,25 @@ def filter_pvz_by_distance(pvz_list: List[dict], max_distance_m: int = 6000) -> 
     return filtered
 
 async def find_best_pvz(address_query: str, city: str = None, limit: int = 10) -> List[dict]:
+    city_code = None
+    parts = address_query.split(",", 1)
+    if len(parts) > 1:
+        possible_city = parts[0].strip()
+        if possible_city in Config.POPULAR_CITIES:
+            city_code = int(Config.POPULAR_CITIES[possible_city])
+        else:
+            city_code = await get_cdek_city_code(possible_city)
+
+    if city_code is None:
+        city_code = 44  # Fallback Москва, если город не указан/не найден
+
     variants = _normalize_address_variants(address_query)
     logger.info(f"Варианты адреса для поиска ПВЗ: {variants}")
 
     all_points: dict[str, dict] = {}
 
     for idx, q in enumerate(variants):
-        pts = await get_cdek_pvz_list(q, city=city, limit=50)
+        pts = await get_cdek_pvz_list(q, city_code=city_code, limit=50)
         logger.info(f"Вариант #{idx+1}: '{q}' → {len(pts)} ПВЗ")
         for p in pts:
             code = str(p.get("code") or "") + "|" + (p.get("uuid") or "")
