@@ -2628,20 +2628,19 @@ async def get_cdek_pvz_list(address_query: str, city_code: Optional[int] = None,
 
     url = "https://api.edu.cdek.ru/v2/deliverypoints"
     params = {
-        "address": address_query.strip(),
         "type": "PVZ",
         "limit": limit
     }
     if city_code is not None:
         params["city_code"] = city_code
-    headers = {"Authorization": f"Bearer {token}"}
+    # Убрали "address" - теперь ищем все PVZ в городе
+    logger.info(f"Запрос ПВЗ: url={url}, params={params}")
 
     try:
-        logger.info(f"Запрос ПВЗ: url={url}, params={params}")
-        resp = await asyncio.to_thread(requests.get, url, params=params, headers=headers, timeout=15)
+        resp = await asyncio.to_thread(requests.get, url, params=params, headers={"Authorization": f"Bearer {token}"}, timeout=15)
         if resp.status_code == 200:
             points = resp.json()
-            logger.info(f"Найдено {len(points)} ПВЗ по запросу '{address_query}'")
+            logger.info(f"Найдено {len(points)} ПВЗ по запросу (city_code={city_code})")
             return points
         else:
             logger.warning(f"Ошибка поиска ПВЗ: {resp.status_code} {resp.text}")
@@ -2801,52 +2800,35 @@ async def find_best_pvz(address_query: str, city: str = None, limit: int = 10) -
     logger.info(f"Определён city_code={city_code} для query='{address_query}'")
 
     if city_code is None:
-        city_code = 44  # Fallback Москва, если город не указан/не найден
+        city_code = 44  # Fallback Москва
+    logger.info(f"Используем city_code={city_code} для query='{address_query}'")
 
-    logger.info(f"Определён city_code={city_code} для query='{address_query}'")
-    variants = _normalize_address_variants(address_query)
-    logger.info(f"Варианты адреса для поиска ПВЗ: {variants}")
-
-    all_points: dict[str, dict] = {}
-
-    for idx, q in enumerate(variants):
-        pts = await get_cdek_pvz_list(q, city_code=city_code, limit=50)
-        logger.info(f"Вариант #{idx+1}: '{q}' → {len(pts)} ПВЗ")
-        for p in pts:
-            code = str(p.get("code") or "") + "|" + (p.get("uuid") or "")
-            if code not in all_points:
-                all_points[code] = p
-
-    if not all_points:
+    # Получаем ВСЕ PVZ в городе (увеличили limit)
+    pts = await get_cdek_pvz_list("", city_code=city_code, limit=1000)
+    if not pts:
         return []
 
-    points = list(all_points.values())
+    # Фильтруем локально по адресу (используя matcher)
+    matcher = _make_exact_matcher(address_query)
+    filtered_points = [p for p in pts if matcher(p.get("location", {}).get("address_full") or p.get("location", {}).get("address") or "")]
 
-    # --- помечаем ПВЗ с точным совпадением дома ---
-    q_street, q_house = _extract_street_house(address_query)
-    q_key = _addr_key(q_street, q_house)
+    if not filtered_points:
+        logger.info("Не найдено ПВЗ по адресу после фильтрации")
+        return []
 
-    if q_key:
-        for p in points:
-            loc = p.get("location") or {}
-            addr = loc.get("address_full") or loc.get("address") or ""
-            p_street, p_house = _extract_street_house(addr)
-            if _addr_key(p_street, p_house) == q_key:
-                p["_amv_exact"] = True
-
+    # Сортировка по distance, если есть
     def _dist(p: dict) -> int:
         d = p.get("distance")
         return int(d) if isinstance(d, (int, float)) else 10**9
 
-    # точное совпадение — всегда раньше, потом по distance
-    points.sort(key=lambda p: (0 if p.get("_amv_exact") else 1, _dist(p)))
+    filtered_points.sort(key=_dist)
 
-    for p in points[:20]:
+    for p in filtered_points[:20]:
         d = p.get("distance")
         addr = (p.get("location") or {}).get("address_full") or (p.get("location") or {}).get("address")
         logger.info(f"PVZ {p.get('code')} | {d} м | {addr}")
 
-    return points[:limit]
+    return filtered_points[:limit]
 
 
 
