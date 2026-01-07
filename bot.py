@@ -343,11 +343,34 @@ class Config:
     POPULAR_CITIES = {
         "Москва": "44",
         "Санкт-Петербург": "137",
-        "Екатеринбург": "195",
         "Новосибирск": "157",
+        "Екатеринбург": "195",
         "Казань": "138",
+        "Нижний Новгород": "152",
+        "Челябинск": "163",
+        "Красноярск": "153",
+        "Самара": "149",
+        "Уфа": "154",
+        "Ростов-на-Дону": "161",
+        "Омск": "158",
+        "Краснодар": "151",
+        "Воронеж": "148",
         "Пермь": "248",
-        "Звенигород": "964"
+        "Волгоград": "147",
+        "Саратов": "150",
+        "Тюмень": "162",
+        "Тольятти": "149",
+        "Ижевск": "140",
+        "Барнаул": "156",
+        "Ульяновск": "155",
+        "Иркутск": "159",
+        "Хабаровск": "160",
+        "Ярославль": "164",
+        "Махачкала": "165",
+        "Владивосток": "166",
+        "Оренбург": "167",
+        "Томск": "168",
+        "Кемерово": "169",
     }
 
 # ========== ADMIN ==========
@@ -1365,7 +1388,7 @@ async def cb_change_contact(cb: CallbackQuery):
         sess.add(user)
         sess.commit()
         await cb.message.answer(
-            "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
+            "Введите адрес или код ПВЗ(например: «Москва, Барклая, 7/1» или «MSK126»):",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
         )
     sess.commit()
@@ -2743,54 +2766,59 @@ def _normalize_address_variants(address_query: str) -> List[str]:
 
 
 def _make_exact_matcher(address_query: str):
-    query = address_query.lower().strip()
+    query = address_query.strip()
 
-    # Если выглядит как код ПВЗ (буквы+цифры, e.g. MSK123, YEKB282, PRM53)
-    if re.match(r'^[a-zA-Z]+\d+$', query.upper()):
+    # Если это код ПВЗ вида MSK126, YEKB282, PRM53 и т.д.
+    if re.fullmatch(r'[A-Z]+\d+', query.upper()):
         code = query.upper()
-        def matcher(addr: str) -> bool:
-            return code == (p.get('code') or '').upper()
         logger.info(f"Matcher: код ПВЗ='{code}'")
+        def matcher(pvz: dict) -> bool:  # ← теперь pvz — параметр!
+            pvz_code = pvz.get("code", "")
+            if isinstance(pvz_code, str):
+                return code == pvz_code.upper()
+            return False
         return matcher
 
-    # Убираем типы улиц, "д.", "к.", "стр.", "лит.", "корп."
-    query = re.sub(r'\b(ул|улица|пр|проспект|пер|переулок|шоссе|бул|бульвар|пл|площадь|наб|набережная|тракт|аллея|д|к|стр|лит|корп|г|город)\b\.?', '', query, flags=re.IGNORECASE)
-    query = re.sub(r'\s+', ' ', query).strip()
+    # Обычный адрес — улучшенный матчер
+    query_lower = query.lower()
 
-    # Находим дом: \d+ (опционально буква/ /к/стр + цифра)
-    house_match = re.search(r'(\d+[а-яА-Я]?(\s*[\/кстрлиткорп]\s*\d*[а-яА-Я]?)?)', query)
+    # Убираем типы улиц и лишнее
+    query_clean = re.sub(r'\b(ул|улица|пр|проспект|пер|переулок|шоссе|бул|бульвар|пл|площадь|наб|набережная|тракт|аллея|д|к|стр|лит|корп|г|город)\b\.?', ' ', query_lower, flags=re.IGNORECASE)
+    query_clean = re.sub(r'\s+', ' ', query_clean).strip()
+
+    # Дом
+    house_match = re.search(r'(\d+[а-яА-Я]?)\s*([\/кстрлиткорп]\.?)?\s*(\d*[а-яА-Я]?)', query_lower)
     house = house_match.group(0).strip() if house_match else None
 
-    # Улица: всё до дома
-    street = query[:house_match.start()].strip() if house_match else query
+    # Улица
+    street = re.sub(r'\d.*$', '', query_clean).strip()
 
     logger.info(f"Matcher: улица='{street}', дом='{house}'")
 
-    def matcher(addr: str) -> bool:
+    def matcher(pvz: dict) -> bool:
+        addr = (pvz.get("location", {}).get("address_full") or pvz.get("location", {}).get("address") or "").lower()
         if not addr:
             return False
-        a = addr.lower()
 
-        # Улица: содержит слова улицы
-        street_words = [w for w in street.split() if w]
-        street_ok = all(w in a for w in street_words) if street_words else True
+        # Улица: все слова из запроса должны быть в адресе
+        street_words = [w for w in street.split() if len(w) > 2]
+        if street_words and not all(word in addr for word in street_words):
+            return False
 
-        # Дом: гибко ищем (e.g. '7/1' как '7 к1', '124 к.1' как '124/1')
-        house_ok = True
+        # Дом: если есть — ищем гибко
         if house:
-            h_norm = re.sub(r'[\/кстрлиткорп\.]', ' ', house).strip()
+            h_clean = re.sub(r'[\/\.кстрлиткорп]', ' ', house)
             patterns = [
-                rf"\b{re.escape(house)}\b",  # точный
-                rf"\b{re.escape(h_norm)}\b",  # без символов
-                rf"\b\d+\s*{re.escape(house[-1])}\b" if house[-1].isalpha() else None  # 124 а
+                re.escape(house),
+                re.escape(h_clean),
+                re.escape(house.replace(' ', ''))
             ]
-            patterns = [p for p in patterns if p]
-            house_ok = any(re.search(p, a) for p in patterns)
+            if not any(re.search(p, addr) for p in patterns):
+                return False
 
-        return street_ok and house_ok
+        return True
 
     return matcher
-
 
 # ======== УМНЫЙ ПОИСК ЛУЧШИХ ПВЗ =========
 
