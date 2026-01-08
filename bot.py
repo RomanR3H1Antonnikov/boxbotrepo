@@ -123,6 +123,21 @@ async def get_cdek_token() -> Optional[str]:
         return None
 
 
+async def get_cdek_prod_token() -> Optional[str]:
+    account = os.getenv("CDEK_PROD_ACCOUNT")
+    password = os.getenv("CDEK_PROD_PASSWORD")
+    if not account or not password:
+        return None
+    url = "https://api.cdek.ru/v2/oauth/token"  # прод!
+    data = {"grant_type": "client_credentials", "client_id": account, "client_secret": password}
+    try:
+        response = await asyncio.to_thread(requests.post, url, data=data, timeout=15)
+        if response.status_code == 200:
+            return response.json().get("access_token")
+    except:
+        return None
+
+
 async def calculate_cdek_delivery_cost(pvz_code: str) -> Optional[dict]:
     """Возвращает dict: {'cost': int, 'period_min': int, 'period_max': int}"""
     token = await get_cdek_token()
@@ -283,6 +298,19 @@ class Config:
         {"duration": 15, "desc": "Перестать убегать от неопределенности жизни..."},
         {"duration": 15, "desc": "Энергию, расходовавшуюся на тревогу, направляем..."},
         {"duration": 16, "desc": "Отправляясь в царство Морфея в спокойнейшем состоянии..."},
+    ]
+    PRACTICE_AUDIO_IDS = [
+        os.getenv("AUDIO1_ID"),
+        os.getenv("AUDIO2_ID"),
+        os.getenv("AUDIO3_ID"),
+        os.getenv("AUDIO4_ID"),
+        os.getenv("AUDIO5_ID"),
+        os.getenv("AUDIO6_ID"),
+        os.getenv("AUDIO7_ID"),
+    ]
+
+    PRACTICE_VIDEO_IDS = [  # только для тех, где есть видео
+        None, None, None, None, None, os.getenv("VIDEO_PRACTICE6_ID"), os.getenv("VIDEO_PRACTICE7_ID")
     ]
     WELCOME_TEXT = ("Привет! Я тебе очень и очень рада. Меня зовут Анна Большакова, но"
                     " сейчас я буду говорить от имени коробочки. Я создана для тебя, чтобы тебе всегда"
@@ -577,6 +605,7 @@ def reset_states(user):
     user.awaiting_pvz_address = False
     user.awaiting_manual_pvz = False
     user.awaiting_manual_track = False
+    user.awaiting_redeem_code = False
     user.pvz_for_order_id = None
     user.temp_gift_order_id = None
     user.temp_pvz_list = None
@@ -1066,10 +1095,21 @@ async def on_start(message: Message):
 @r.message(Command("grab_id"))
 async def grab_id(message: Message):
     src = message.reply_to_message
-    if src and src.video:
-        await message.answer(f"file_id видео: {src.video.file_id}")
+    if not src:
+        await message.answer("Сделайте /grab_id ответом на сообщение с медиа.")
+        return
+
+    if src.video or src.video_note:
+        file_id = src.video.file_id if src.video else src.video_note.file_id
+        await message.answer(f"file_id видео/кружочка: {file_id}")
+    elif src.audio:
+        await message.answer(f"file_id аудио: {src.audio.file_id}")
+    elif src.voice:
+        await message.answer(f"file_id голосового: {src.voice.file_id}")
+    elif src.document:
+        await message.answer(f"file_id документа (аудио?): {src.document.file_id}")
     else:
-        await message.answer("Сделайте /grab_id ответом на видео.")
+        await message.answer("Нет поддерживаемого медиа в ответе.")
 
 @r.message(Command("menu"))
 async def cmd_menu(message: Message):
@@ -1308,6 +1348,20 @@ async def cb_open_practice(cb: CallbackQuery):
         except Exception as e:
             logger.error(f"Practice video error: {e}")
     await send_practice_intro(cb.message, idx, title)
+    audio_id = Config.PRACTICE_AUDIO_IDS[idx] if idx < len(Config.PRACTICE_AUDIO_IDS) else None
+    video_id = Config.PRACTICE_VIDEO_IDS[idx] if idx < len(Config.PRACTICE_VIDEO_IDS) else None
+
+    if video_id:
+        await cb.message.answer_video_note(video_id)
+    if audio_id:
+        # Берём длительность из Config.PRACTICE_DETAILS
+        duration_minutes = Config.PRACTICE_DETAILS[idx]["duration"]
+        await cb.message.answer_audio(
+            audio=audio_id,
+            title=title,
+            performer="Анна Большакова",
+            duration=duration_minutes * 60  # в секундах, как требует Telegram
+        )
     await cb.message.answer(f"<b>Практика:</b> {title}\n\nНачинаем?", reply_markup=kb_practice_card(idx))
     sess.commit()
     await cb.answer()
@@ -1324,7 +1378,7 @@ async def cb_redeem_start(cb: CallbackQuery):
     if not user.is_authorized:
         await cb.message.answer("Сначала авторизуйтесь.", reply_markup=kb_cabinet_unauth())
         await cb.answer(); return
-    # user.awaiting_code = True
+    user.awaiting_redeem_code = True
     await cb.message.answer("Введите <b>код с карточки</b>:",
                             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.CABINET.value}]]))
     sess.commit()
@@ -1879,7 +1933,7 @@ async def cb_pvz_reenter(cb: CallbackQuery):
         sess.commit()
 
     await cb.message.edit_text(
-        "Введите адрес ПВЗ ещё раз (например: Барклая, 5А):",
+        "Введите адрес ПВЗ ещё раз (например: Москва, пр. 6-й Рощинский, 1с4):",
         reply_markup=create_inline_keyboard([
             [{"text": "Отмена", "callback_data": CallbackData.MENU.value}]
         ])
@@ -2490,6 +2544,43 @@ async def on_message_router(message: Message):
             )
             return
 
+    # ===== АКТИВАЦИЯ КОДА =====
+    if user.awaiting_redeem_code:
+        if not CODE_RE.match(text):
+            await message.answer("Код должен состоять из 4 цифр. Попробуйте ещё раз.")
+            return
+
+        code = text.strip()
+
+        if code not in Config.CODES_POOL:
+            await message.answer("❌ Код не найден или уже использован.")
+            user.awaiting_redeem_code = False
+            sess.commit()
+            await message.answer("Вернитесь в кабинет:", reply_markup=kb_cabinet())
+            return
+
+        # Успешная активация
+        Config.CODES_POOL.remove(code)  # удаляем из пула
+
+        if not user.practices:
+            user.practices = []
+
+        # Добавляем все практики, если их ещё нет
+        for practice in Config.DEFAULT_PRACTICES:
+            if practice not in user.practices:
+                user.practices.append(practice)
+
+        user.awaiting_redeem_code = False
+        sess.commit()
+
+        await message.answer(
+            "🎉 Код активирован!\n\n"
+            "Теперь у тебя есть доступ ко всем 7 практикам навсегда ❤️\n"
+            "Перейди в раздел «Мои практики»",
+            reply_markup=kb_practices_list(user.practices)
+        )
+        return
+
     # ===== 4. ОБЫЧНЫЙ ТЕКСТ / ФОЛЛБЕК =====
     await on_text(message)
 
@@ -2633,12 +2724,15 @@ async def get_cdek_city_code(city_name: str) -> Optional[int]:
 
 
 async def get_cdek_pvz_list(address_query: str, city_code: Optional[int] = None, limit: int = 50) -> List[dict]:
-    token = await get_cdek_token()
+    # token = await get_cdek_token()
+    token = await get_cdek_prod_token()
     if not token:
-        logger.error("Нет токена для поиска ПВЗ")
-        return []
+        token = await get_cdek_token()  # fallback на тест
+        if not token:
+            logger.error("Нет токена для поиска ПВЗ")
+            return []
 
-    url = "https://api.edu.cdek.ru/v2/deliverypoints"
+    url = "https://api.cdek.ru/v2/deliverypoints"
     params = {
         "type": "PVZ",
         "limit": limit

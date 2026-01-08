@@ -51,6 +51,9 @@ class User(Base):
     awaiting_manual_pvz: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=text("0"), nullable=False
     )
+    awaiting_redeem_code: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
     awaiting_manual_track: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # ==================== Временные ID для текущих операций ====================
