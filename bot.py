@@ -3,6 +3,7 @@ import re
 import asyncio
 import logging
 import requests
+from pathlib import Path
 from collections import defaultdict
 from typing import Optional, Dict, List
 from enum import Enum
@@ -30,7 +31,7 @@ from dotenv import load_dotenv
 
 # ========== CONFIG ==========
 USE_WEBHOOK = False
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).parent / '.env')
 print("Текущая рабочая директория:", os.getcwd())
 print("Существует ли .env:", os.path.exists('.env'))
 print("Содержимое os.environ (первые 10):", list(os.environ.items())[:10])
