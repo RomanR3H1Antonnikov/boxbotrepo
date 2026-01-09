@@ -381,6 +381,10 @@ class Config:
         "Оренбург": "167",
         "Томск": "168",
         "Кемерово": "169",
+        "Балашиха": "1097",
+        "Звенигород": "964",
+        "Егорьевск": "21",
+        # Добавить свои по мере тестов
     }
 
 # ========== ADMIN ==========
@@ -1987,12 +1991,20 @@ async def cb_pvz_select(cb: CallbackQuery):
             return
 
         raw_code = pvz.get("code")
-        if isinstance(raw_code, str) and raw_code.startswith("MSK"):
-            real_code = int(raw_code.replace("MSK", ""))
+        if isinstance(raw_code, str):
+            # Убираем префикс региона (MSK, YAR, KZN, NN и т.д.)
+            prefix_match = re.match(r'^([A-Z]{3,4})(\d+)', raw_code)
+            if prefix_match:
+                real_code = int(prefix_match.group(2))
+            else:
+                # Если без префикса - пробуем как число
+                try:
+                    real_code = int(raw_code)
+                except ValueError:
+                    await cb.answer("Ошибка кода ПВЗ", show_alert=True)
+                    return
         elif isinstance(raw_code, int):
             real_code = raw_code
-        elif isinstance(raw_code, str):
-            real_code = int("".join(filter(str.isdigit, raw_code)))
         else:
             await cb.answer("Ошибка кода ПВЗ", show_alert=True)
             return
@@ -2861,7 +2873,7 @@ def _make_exact_matcher(address_query: str):
     query_clean = re.sub(r'[^\w\s]', ' ', query_clean)  # убираем все не-буквы/цифры/пробелы
     query_clean = re.sub(r'\s+', ' ', query_clean).strip()
 
-    # Извлекаем возможную улицу и дом
+    # Извлекаем улицу и дом
     house_match = re.search(r'(\d+[а-яА-Яа-я0-9/\\кстрлиткорп\.\s]*\d*)', query_clean)
     house = house_match.group(0).strip() if house_match else None
 
@@ -2876,18 +2888,18 @@ def _make_exact_matcher(address_query: str):
         if not addr:
             return False
 
-        # Улица — очень мягко (первые 3 символа)
+        # Улица — очень мягко (первые 3 символа или хотя бы 3 буквы)
         if len(query_clean) >= 3 and query_clean[:3] not in addr:
             if street and len(street) >= 3 and street[:3] not in addr:
                 return False
 
-        # Дом — работаем только если в запросе есть цифры
+        # Дом — проверяем только если есть цифры
         if house:
             house_digits = re.sub(r'[^\d]', '', house)
-            if house_digits:  # есть хоть какие-то цифры
-                addr_digits = re.sub(r'[^\d]', '', addr)  # всегда считаем здесь
+            if house_digits:
+                addr_digits = re.sub(r'[^\d]', '', addr)  # ВЫНОСИМ СЮДА — всегда определено!
 
-                # Стратегия: берём столько цифр, сколько есть (но не меньше 1 и не больше 4)
+                # Берём минимум 3 цифры или сколько есть
                 compare_len = min(max(len(house_digits), 1), 4)
                 if house_digits[:compare_len] not in addr_digits:
                     return False
