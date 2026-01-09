@@ -2,8 +2,6 @@ import os
 import re
 import asyncio
 import logging
-
-import aiohttp
 import requests
 from pathlib import Path
 from collections import defaultdict
@@ -20,7 +18,6 @@ from db.repo import (
 )
 from db.models import Order
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
@@ -391,15 +388,11 @@ ADMIN_USERNAMES = {"@RE_HY"}
 ADMIN_ID = 1049170524
 
 # ========== BOOTSTRAP ==========
-session = AiohttpSession(
-    timeout=90,              # 90 секунд вместо 30
-    connector=aiohttp.TCPConnector(limit=50)  # больше одновременных соединений
-)
 bot = Bot(
     Config.TOKEN,
-    session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
+
 dp = Dispatcher()
 r = Router()
 dp.include_router(r)
