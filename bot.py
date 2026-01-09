@@ -31,7 +31,9 @@ from dotenv import load_dotenv
 # ========== CONFIG ==========
 USE_WEBHOOK = False
 load_dotenv()
-
+print("Текущая рабочая директория:", os.getcwd())
+print("Существует ли .env:", os.path.exists('.env'))
+print("Содержимое os.environ (первые 10):", list(os.environ.items())[:10])
 
 # === PAYMENT LOCKS (защита от повторных нажатий) ===
 _payment_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
