@@ -2,6 +2,8 @@ import os
 import re
 import asyncio
 import logging
+
+import aiohttp
 import requests
 from pathlib import Path
 from collections import defaultdict
@@ -18,6 +20,7 @@ from db.repo import (
 )
 from db.models import Order
 from aiogram import Bot, Dispatcher, Router, F
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
@@ -337,27 +340,6 @@ class Config:
         "• Доступ навсегда\n"
         "• Поддержка в чате"
     )
-    # FAQ_ANSWERS = {
-    #     "faq:q1": "Это комплект заботы о себе. Внутри - предметы, практики и маленькие сюрпризы, которые помогают снизить тревогу, восстановить ресурс и почувствовать опору.",
-    #     "faq:q2": "Это не замена терапии, а мягкая поддержка. Консультация - это работа в диалоге со специалистом. А коробочка - ваш личный набор «здесь и сейчас», чтобы помочь себе в нужный момент.",
-    #     "faq:q3": "Для тех, кто чувствует тревогу, усталость, потерю энергии, перегрузку делами. Подойдёт и тем, кто просто хочет ввести новые ритуалы заботы о себе.",
-    #     "faq:q4": "1. Путеводитель на пути к равновесию\n2. 7 видео и аудио практик\n3. Баночка поддерживающих посланий\n4. Маска для практик со льном и лавандой\n5. Чай “Глоток тепла и спокойствия”\n6. Маркер для зеркала\n7. Личные послания от экспертов\n8. Вдохновляющее письмо в конверте",
-    #     "faq:q5": "Практики разработаны пятью практикующими психологами. Каждый из них, используя собственный уникальный стиль, помогает супер объемно и результативно подойти к решению.",
-    #     "faq:q6": "Откройте её в момент тревоги или когда хочется тепла. Выбирайте ритуал, заваривайте чай, доставайте фразу или выполняйте практику. Всё — в своём темпе.",
-    #     "faq:q7": "Да! Практики и предметы рассчитаны на многократное использование. А баночка с фразами - это как маленькое объятие словами, к которой можно возвращаться.",
-    #     "faq:q8": "От 2 минут (например, достать фразу поддержки) до 15–20 минут (практика или ритуал). Всё зависит от того, сколько у вас ресурса сейчас.",
-    #     "faq:q9": "Актуальную цену можно посмотреть в разделе Инфо.",
-    #     "faq:q10": "Нажмите кнопку «Заказать», бот поможет оформить заказ и доставку.",
-    #     "faq:q11": "В среднем 3–7 дней, в зависимости от региона и службы доставки.",
-    #     "faq:q12": "Конечно. В коробочку можно добавить послание для получателя, текст послания вы пишите в поле для комментариев.",
-    #     "faq:q13": "Напишите в бот или свяжитесь с нами, мы восстановим доступ",
-    #     "faq:q14": "Да! Уже готовим сезонные коллекции: новогоднюю, к 14 февраля, 23 февраля и 8 марта. Каждая со своей темой.",
-    #     "faq:q15": "Конечно, можно. Они часто становятся отличным подарком близким.",
-    #     "faq:q16": "Обычные наборы - это вещи. Наша коробочка - это опыт, смыслы, ответы. Она создана так, чтобы вы не просто получили предметы, а прожили поддержку, заботу и практику.",
-    #     "faq:q17": "Пока доставка работает только по России. В будущем планируем расширение.",
-    #     "faq:q18": "Тебя ждёт продолжение путешествие в закрытом чате (здесь нужна ссылка на чат), где в бессрочном доступе будут поддерживающая атмосфера, эфиры от мастеров и возможность делиться своими успехами и вдохновляться результатами близких по духу людей",
-    #     "faq:q19": "Напишите в Telegram: @anbolshakowa и @dmitrieva_live, мы ответим вам с 10:00 до 20:00 (gmt+3) в рабочие дни с понедельника по пятницу"
-    # }
     PAYMENT_TIMEOUT_SEC = 600
 
     # Склад в СДЭК (код города). Москва = 44, СПб = 137, Екат = 195 и т.д.
@@ -409,11 +391,15 @@ ADMIN_USERNAMES = {"@RE_HY"}
 ADMIN_ID = 1049170524
 
 # ========== BOOTSTRAP ==========
+session = AiohttpSession(
+    timeout=90,              # 90 секунд вместо 30
+    connector=aiohttp.TCPConnector(limit=50)  # больше одновременных соединений
+)
 bot = Bot(
     Config.TOKEN,
+    session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
-
 dp = Dispatcher()
 r = Router()
 dp.include_router(r)
@@ -2863,16 +2849,18 @@ def _normalize_address_variants(address_query: str) -> List[str]:
 
 
 def _make_exact_matcher(address_query: str):
-    query = address_query.strip()
+    query = address_query.strip().lower()
 
-    if re.fullmatch(r'[A-Z]+\d+', query.upper()):
-        return lambda p: False
+    # Убираем город из начала (часто мешает)
+    if ',' in query:
+        query = query.split(',', 1)[1].strip()
 
-    query_lower = query.lower()
-    query_clean = re.sub(r'\b(ул|улица|пр|проспект|пер|переулок|шоссе|бул|бульвар|пл|площадь|наб|набережная|тракт|аллея|д|к|стр|лит|корп|г|город)\b\.?', ' ', query_lower, flags=re.IGNORECASE)
+    # Нормализуем: убираем типы улиц
+    query_clean = re.sub(r'\b(ул|улица|пр|проспект|пер|переулок|ш|шоссе|бул|бульвар|пл|площадь|наб|набережная|тракт|аллея|кв|квартал|д|дом|стр|строение|корп|корпус|лит|литера)\b\.?', '', query, flags=re.IGNORECASE)
     query_clean = re.sub(r'\s+', ' ', query_clean).strip()
 
-    house_match = re.search(r'(\d+[а-яА-Я]?)\s*([\/кстрлиткорп]\.?)?\s*(\d*[а-яА-Я]?)', query_lower)
+    # Извлекаем улицу и дом
+    house_match = re.search(r'(\d+[а-яА-Яа-я0-9/\\кстрлиткорп\.\s]*\d*)', query)
     house = house_match.group(0).strip() if house_match else None
 
     street = re.sub(r'\d.*$', '', query_clean).strip()
@@ -2881,21 +2869,21 @@ def _make_exact_matcher(address_query: str):
 
     def matcher(pvz: dict) -> bool:
         addr = (pvz.get("location", {}).get("address_full") or pvz.get("location", {}).get("address") or "").lower()
+
         if not addr:
             return False
 
-        street_words = [w for w in street.split() if len(w) > 2]
-        if street_words and not all(word in addr for word in street_words):
-            return False
+        # Мягкое совпадение улицы: хотя бы одно ключевое слово > 3 букв
+        street_words = [w for w in street.split() if len(w) > 3]
+        if street_words:
+            if not any(word in addr for word in street_words):
+                return False
 
+        # Дом: хотя бы начало цифр должно совпадать
         if house:
-            h_clean = re.sub(r'[\/\.кстрлиткорп]', ' ', house)
-            patterns = [
-                re.escape(house),
-                re.escape(h_clean),
-                re.escape(house.replace(' ', ''))
-            ]
-            if not any(re.search(p, addr, re.IGNORECASE) for p in patterns):
+            house_clean = re.sub(r'[^\d]', '', house)[:4]  # берём первые 4 цифры
+            addr_digits = re.sub(r'[^\d]', '', addr)
+            if house_clean not in addr_digits:
                 return False
 
         return True
