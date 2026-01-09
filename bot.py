@@ -1436,6 +1436,12 @@ async def cb_change_contact(cb: CallbackQuery):
 async def cb_simple_navigation(cb: CallbackQuery):
     data = cb.data
     try:
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            user = get_user_by_id(sess, cb.from_user.id)
+            if user:
+                reset_states(user)
+                sess.commit()
         if data == "menu":
             await edit_or_send(cb.message, "Выбери действие:", kb_main())
         elif data == "gallery":
@@ -2844,16 +2850,19 @@ def _normalize_address_variants(address_query: str) -> List[str]:
 def _make_exact_matcher(address_query: str):
     query = address_query.strip().lower()
 
-    # Убираем город из начала (часто мешает)
+    # Убираем город из начала (если есть)
     if ',' in query:
-        query = query.split(',', 1)[1].strip()
+        parts = query.split(',', 1)
+        if len(parts) > 1:
+            query = parts[1].strip()
 
-    # Нормализуем: убираем типы улиц
-    query_clean = re.sub(r'\b(ул|улица|пр|проспект|пер|переулок|ш|шоссе|бул|бульвар|пл|площадь|наб|набережная|тракт|аллея|кв|квартал|д|дом|стр|строение|корп|корпус|лит|литера)\b\.?', '', query, flags=re.IGNORECASE)
+    # Нормализуем: убираем типы улиц и лишние символы
+    query_clean = re.sub(r'\b(ул|улица|пр|проспект|пр-т|пер|переулок|ш|шоссе|бул|бульвар|пл|площадь|наб|набережная|тракт|аллея|кв|квартал|д|дом|стр|строение|корп|корпус|лит|литера|к)\b\.?', '', query, flags=re.IGNORECASE)
+    query_clean = re.sub(r'[^\w\s]', ' ', query_clean)  # убираем все не-буквы/цифры/пробелы
     query_clean = re.sub(r'\s+', ' ', query_clean).strip()
 
-    # Извлекаем улицу и дом
-    house_match = re.search(r'(\d+[а-яА-Яа-я0-9/\\кстрлиткорп\.\s]*\d*)', query)
+    # Извлекаем возможную улицу и дом
+    house_match = re.search(r'(\d+[а-яА-Яа-я0-9/\\кстрлиткорп\.\s]*\d*)', query_clean)
     house = house_match.group(0).strip() if house_match else None
 
     street = re.sub(r'\d.*$', '', query_clean).strip()
@@ -2861,23 +2870,27 @@ def _make_exact_matcher(address_query: str):
     logger.info(f"Matcher: улица='{street}', дом='{house}'")
 
     def matcher(pvz: dict) -> bool:
-        addr = (pvz.get("location", {}).get("address_full") or pvz.get("location", {}).get("address") or "").lower()
+        addr = (pvz.get("location", {}).get("address_full") or
+                pvz.get("location", {}).get("address") or "").lower()
 
         if not addr:
             return False
 
-        # Мягкое совпадение улицы: хотя бы одно ключевое слово > 3 букв
-        street_words = [w for w in street.split() if len(w) > 3]
-        if street_words:
-            if not any(word in addr for word in street_words):
+        # Улица — очень мягко (первые 3 символа)
+        if len(query_clean) >= 3 and query_clean[:3] not in addr:
+            if street and len(street) >= 3 and street[:3] not in addr:
                 return False
 
-        # Дом: хотя бы начало цифр должно совпадать
+        # Дом — работаем только если в запросе есть цифры
         if house:
-            house_clean = re.sub(r'[^\d]', '', house)[:4]  # берём первые 4 цифры
-            addr_digits = re.sub(r'[^\d]', '', addr)
-            if house_clean not in addr_digits:
-                return False
+            house_digits = re.sub(r'[^\d]', '', house)
+            if house_digits:  # есть хоть какие-то цифры
+                addr_digits = re.sub(r'[^\d]', '', addr)  # всегда считаем здесь
+
+                # Стратегия: берём столько цифр, сколько есть (но не меньше 1 и не больше 4)
+                compare_len = min(max(len(house_digits), 1), 4)
+                if house_digits[:compare_len] not in addr_digits:
+                    return False
 
         return True
 
