@@ -2727,27 +2727,22 @@ async def get_cdek_pvz_list(address_query: str, city_code: Optional[int] = None,
 
 def _shorten_address(address: str) -> str:
     if not address:
-        return ""
+        return "ПВЗ СДЭК"
 
-    # Пример: "г Москва, ул Барклая, д 7 к 1" → "ул Барклая 7 к 1"
-    parts = [p.strip() for p in address.split(",") if p.strip()]
-    if len(parts) < 2:
-        return address[:50]
+    # Убираем всё до последней запятой (город, индекс и т.д.)
+    short = address.split(",")[-1].strip()
 
-    # Ищем часть с улицей
-    street_part = ""
-    house_part = parts[-1]
+    # Убираем "д. ", "корп. ", "к ", "стр. ", "литер " и т.п.
+    short = re.sub(r'\b(д|дом|к|корп|корпус|стр|строение|лит|литера|пом|помещение|офис|оф)\.?\s*', '', short, flags=re.IGNORECASE)
 
-    for p in parts:
-        if any(kw in p.lower() for kw in STREET_KEYWORDS + ["барклая", "ленинский", "профсоюзная"]):
-            street_part = p
-            break
+    # Убираем лишние пробелы
+    short = re.sub(r'\s+', ' ', short).strip()
 
-    # Очищаем дом от лишнего
-    house_clean = house_part.split("стр.")[0].split("лит")[0].strip(" ,.")
+    # Если всё ещё слишком длинное — обрезаем до 30 символов
+    if len(short) > 30:
+        short = short[:27] + "..."
 
-    result = f"{street_part} {house_clean}".strip()
-    return result if result else address.split(",", 1)[-1].strip()
+    return short or "ПВЗ СДЭК"
 
 
 def _extract_street_house(addr: str) -> tuple[Optional[str], Optional[str]]:
@@ -3058,13 +3053,24 @@ async def find_best_pvz(address_query: str, city: str = None, limit: int = 12) -
     # ───────────────────────────────────────────────
     # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ — поведение при неудаче
     # ───────────────────────────────────────────────
+    # Если ничего не нашли по матчингу — показываем все ПВЗ города
     if not filtered:
         logger.info("Ни один точный ПВЗ не найден даже после всех попыток")
-        return []  # ← Возвращаем ПУСТОЙ список!
 
-    # Если что-то нашли — продолжаем как раньше
-    if any("distance" in p for p in filtered):
-        filtered.sort(key=lambda p: p.get("distance") or 999999)
+        # НОВОЕ ПОВЕДЕНИЕ
+        if city_code != 44:  # Если это НЕ Москва
+            logger.info(
+                f"Город определён как {city_name_candidate or 'неизвестный'} (code={city_code}) → показываем все ПВЗ города")
+            filtered = pts[:limit]  # показываем первые N ПВЗ города
+        else:
+            logger.info("Город — Москва или не определён → НЕ показываем все ПВЗ (чтобы не спамить)")
+            return []  # пустой список → будет сообщение "не нашли"
+
+        # Если всё же показываем - сортируем по алфавиту (или по distance, если есть)
+        if any("distance" in p for p in filtered):
+            filtered.sort(key=lambda p: p.get("distance") or 999999)
+        else:
+            filtered.sort(key=lambda p: p.get("code", ""))
 
     result = filtered[:limit]
 
