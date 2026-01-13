@@ -318,8 +318,13 @@ class Config:
         None,
         os.getenv("AUDIO4_ID"),
         os.getenv("AUDIO5_ID"),
-        os.getenv("AUDIO6_ID"),
+        None,
         os.getenv("AUDIO7_ID"),
+    ]
+    PRACTICE_BONUS_AUDIO = [
+        None, None, None, None, None,
+        os.getenv("AUDIO6_BONUS_ID"),  # только для "Созидать жизнь"
+        None
     ]
 
     PRACTICE_VIDEO_IDS = [  # только для тех, где есть видео
@@ -1263,7 +1268,7 @@ async def cb_team(cb: CallbackQuery):
     await cb.answer()
 
 # ========== PRACTICES ==========
-@r.callback_query(F.data == CallbackData.PRACTICES.value)
+@r.callback_query(F.data.startswith("practice:"))
 async def cb_practices(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
@@ -1272,99 +1277,100 @@ async def cb_practices(cb: CallbackQuery):
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-        if not user.is_authorized:
-            await edit_or_send(cb.message, "Пожалуйста, авторизуйтесь.", kb_cabinet_unauth())
-            await cb.answer()
-            return
-
-        if not user.practices:
-            await edit_or_send(cb.message, "У вас нет практик.\nАктивируйте код или закажите коробочку.", kb_empty_practices())
-            await cb.answer()
-            return
-
-        await edit_or_send(cb.message, "Твои практики:", kb_practices_list(user.practices))
-        await cb.answer()
-
-@r.callback_query(F.data.startswith("practice:"))
-async def cb_open_practice(cb: CallbackQuery):
-    engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
-        user = get_user_by_id(sess, cb.from_user.id)
-        if not user:
-            await cb.answer("Ошибка доступа", show_alert=True)
-            return
-
     parts = cb.data.split(":")
-    if len(parts) >= 3 and parts[1] == "play":
-        # Здесь можно будет реализовать запуск (например, отправить всё сразу)
-        await cb.answer("Практика запущена! (пока просто заглушка)", show_alert=True)
+    action = parts[1] if len(parts) > 1 else None
+    idx_str = parts[2] if len(parts) > 2 else None
+
+    if not idx_str or not idx_str.isdigit():
+        await cb.answer("Ошибка", show_alert=True)
         return
 
-    try:
-        idx = int(parts[1])
-    except:
-        await cb.message.answer("Ошибка.", reply_markup=kb_practices_list(user.practices))
-        await cb.answer()
-        return
+    idx = int(idx_str)
 
     if not (user.is_authorized and 0 <= idx < len(user.practices)):
-        await cb.message.answer("Доступ ограничен.", reply_markup=kb_practices_list(user.practices))
-        await cb.answer()
+        await cb.answer("Доступ ограничен", show_alert=True)
         return
 
     title = user.practices[idx]
 
-    # Вступительное видео/кружочек (если есть)
-    note_id = Config.PRACTICE_NOTES.get(idx)
-    if note_id:
-        try:
-            await cb.message.answer_video_note(note_id)
-        except Exception as e:
-            logger.error(f"Practice intro video error {idx}: {e}")
+    if action == "play":
+        # ← Здесь начинается практика после нажатия "Начать"
 
-    await send_practice_intro(cb.message, idx, title)
+        # 1. Вступительное видео/кружочек (если есть)
+        note_id = Config.PRACTICE_NOTES.get(idx)
+        if note_id:
+            try:
+                await cb.message.answer_video_note(note_id)
+            except Exception as e:
+                logger.error(f"Intro video error {idx}: {e}")
 
-    # Основное видео (если есть)
-    video_id = None
-    if idx < len(Config.PRACTICE_VIDEO_IDS):
-        video_id = Config.PRACTICE_VIDEO_IDS[idx]
-    if video_id:
-        try:
-            await cb.message.answer_video_note(video_id)
-        except Exception as e:
-            logger.error(f"Practice video error {idx}: {e}")
+        # 2. Описание практики
+        await send_practice_intro(cb.message, idx, title)
 
-    # Аудио (основное)
-    audio_id = None
-    if idx < len(Config.PRACTICE_AUDIO_IDS):
-        audio_id = Config.PRACTICE_AUDIO_IDS[idx]
+        # 3. Основное видео (если есть)
+        video_id = None
+        if idx < len(Config.PRACTICE_VIDEO_IDS):
+            video_id = Config.PRACTICE_VIDEO_IDS[idx]
+        if video_id:
+            try:
+                await cb.message.answer_video_note(video_id)
+            except Exception as e:
+                logger.error(f"Practice video error {idx}: {e}")
 
-    if audio_id:
-        try:
-            duration_minutes = Config.PRACTICE_DETAILS[idx]["duration"]
-            performer = (
-                Config.PRACTICE_PERFORMERS[idx]
-                if idx < len(Config.PRACTICE_PERFORMERS)
-                else "Анна Большакова"
-            )
+        # 4. Бонус-аудио (только для "Созидать жизнь")
+        bonus_audio = None
+        if idx < len(Config.PRACTICE_BONUS_AUDIO):
+            bonus_audio = Config.PRACTICE_BONUS_AUDIO[idx]
 
-            await cb.message.answer_audio(
-                audio=audio_id,
-                title=title,
-                performer=performer,
-                duration=duration_minutes * 60
-            )
-        except Exception as e:
-            logger.error(f"Audio send error {idx}: {e}")
-            await cb.message.answer("Не удалось загрузить аудио этой практики 😔")
+        if bonus_audio:
+            try:
+                await cb.message.answer_audio(
+                    audio=bonus_audio,
+                    title=f"{title} — Бонус",
+                    performer=Config.PRACTICE_PERFORMERS[idx],
+                    duration=300  # пример, подставь реальную длительность если знаешь
+                )
+                await asyncio.sleep(1.5)  # небольшая пауза между аудио
+            except Exception as e:
+                logger.error(f"Bonus audio error {idx}: {e}")
 
-    # Финальное приглашение начать
-    await cb.message.answer(
-        f"<b>Практика:</b> {title}\n\nГотовы начать?",
-        reply_markup=kb_practice_card(idx)
-    )
+        # 5. Основное аудио
+        audio_id = None
+        if idx < len(Config.PRACTICE_AUDIO_IDS):
+            audio_id = Config.PRACTICE_AUDIO_IDS[idx]
 
-    await cb.answer()
+        if audio_id:
+            try:
+                duration_minutes = Config.PRACTICE_DETAILS[idx]["duration"]
+                await cb.message.answer_audio(
+                    audio=audio_id,
+                    title=title,
+                    performer=Config.PRACTICE_PERFORMERS[idx],
+                    duration=duration_minutes * 60
+                )
+            except Exception as e:
+                logger.error(f"Main audio error {idx}: {e}")
+                await cb.message.answer("Не удалось загрузить основное аудио 😔")
+
+        await cb.message.answer(
+            "Практика завершена! ✨\n\nХочешь повторить или перейти к следующей?",
+            reply_markup=kb_practices_list(user.practices)
+        )
+
+        await cb.answer("Практика началась!")
+
+    else:
+        # ← Просто открыли карточку практики (показ описания + кнопка Начать)
+
+        await send_practice_intro(cb.message, idx, title)
+
+        # Можно ещё добавить короткое превью или просто кнопку
+        await cb.message.answer(
+            f"<b>{title}</b>\n\nГотовы приступить к практике?",
+            reply_markup=kb_practice_card(idx)
+        )
+
+        await cb.answer()
 
 # ========== REDEEM ==========
 @r.callback_query(F.data == CallbackData.REDEEM_START.value)
