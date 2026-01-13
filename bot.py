@@ -1270,146 +1270,196 @@ async def cb_team(cb: CallbackQuery):
 # ========== PRACTICES ==========
 @r.callback_query(F.data == CallbackData.PRACTICES.value)
 async def cb_practices_list(cb: CallbackQuery):
+    logger.info(f"[PRACTICES_LIST] Начало обработки | user_id={cb.from_user.id} | data={cb.data}")
+
     engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
-        user = get_user_by_id(sess, cb.from_user.id)
-        if not user:
-            await cb.answer("Ошибка доступа", show_alert=True)
-            return
+    try:
+        with Session(engine) as sess:
+            user = get_user_by_id(sess, cb.from_user.id)
+            if not user:
+                logger.error(f"[PRACTICES_LIST] Пользователь не найден | user_id={cb.from_user.id}")
+                await cb.answer("Ошибка доступа", show_alert=True)
+                return
 
-        if not user.is_authorized:
+            logger.info(
+                f"[PRACTICES_LIST] Пользователь найден | is_authorized={user.is_authorized} | practices_count={len(user.practices if user.practices else [])}")
+
+            if not user.is_authorized:
+                logger.warning(f"[PRACTICES_LIST] Не авторизован → редирект на авторизацию")
+                await edit_or_send(
+                    cb.message,
+                    "Чтобы увидеть практики — авторизуйтесь в личном кабинете.",
+                    kb_cabinet_unauth()
+                )
+                await cb.answer()
+                return
+
+            if not user.practices:
+                logger.info(f"[PRACTICES_LIST] У пользователя нет практик")
+                await edit_or_send(
+                    cb.message,
+                    "У вас пока нет практик.\nАктивируйте код или закажите коробочку!",
+                    kb_empty_practices()
+                )
+                await cb.answer()
+                return
+
+            logger.info(f"[PRACTICES_LIST] Успешно → показываем список из {len(user.practices)} практик")
             await edit_or_send(
                 cb.message,
-                "Чтобы увидеть практики — авторизуйтесь в личном кабинете.",
-                kb_cabinet_unauth()
+                "Твои практики:",
+                kb_practices_list(user.practices)
             )
             await cb.answer()
-            return
 
-        if not user.practices:
-            await edit_or_send(
-                cb.message,
-                "У вас пока нет практик.\nАктивируйте код или закажите коробочку!",
-                kb_empty_practices()
-            )
-            await cb.answer()
-            return
-
-        await edit_or_send(
-            cb.message,
-            "Твои практики:",
-            kb_practices_list(user.practices)
-        )
-    await cb.answer()
+    except Exception as e:
+        logger.exception(
+            f"[PRACTICES_LIST] Критическая ошибка при обработке списка практик | user_id={cb.from_user.id}")
+        await notify_admin(f"Паника в PRACTICES_LIST!\nUser: {cb.from_user.id}\nError: {e}")
+        await cb.answer("Произошла ошибка при загрузке практик 😔\nПопробуйте позже или напишите в поддержку",
+                        show_alert=True)
 
 
 @r.callback_query(F.data.startswith("practice:"))
 async def cb_single_practice(cb: CallbackQuery):
+    logger.info(f"[PRACTICE_SINGLE] Начало | user_id={cb.from_user.id} | callback_data={cb.data}")
+
     engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
-        user = get_user_by_id(sess, cb.from_user.id)
-        if not user:
-            await cb.answer("Ошибка доступа", show_alert=True)
-            return
+    try:
+        with Session(engine) as sess:
+            user = get_user_by_id(sess, cb.from_user.id)
+            if not user:
+                logger.error(f"[PRACTICE_SINGLE] Пользователь не найден | user_id={cb.from_user.id}")
+                await cb.answer("Ошибка доступа", show_alert=True)
+                return
 
-    parts = cb.data.split(":")
-    action = parts[1] if len(parts) > 1 else None
-    idx_str = parts[2] if len(parts) > 2 else None
+            logger.info(f"[PRACTICE_SINGLE] Пользователь найден | authorized={user.is_authorized} | temp_playing={user.temp_playing_practice}")
 
-    if not idx_str or not idx_str.isdigit():
-        await cb.answer("Ошибка", show_alert=True)
-        return
+            parts = cb.data.split(":")
+            action = parts[1] if len(parts) > 1 else None
+            idx_str = parts[2] if len(parts) > 2 else None
 
-    idx = int(idx_str)
+            if not idx_str or not idx_str.isdigit():
+                logger.warning(f"[PRACTICE_SINGLE] Некорректный callback_data: {cb.data}")
+                await cb.answer("Ошибка формата команды", show_alert=True)
+                return
 
-    if not (user.is_authorized and 0 <= idx < len(user.practices)):
-        await cb.answer("Доступ ограничен", show_alert=True)
-        return
+            idx = int(idx_str)
+            logger.info(f"[PRACTICE_SINGLE] Запрошена практика №{idx}")
 
-    title = user.practices[idx]
+            if not (user.is_authorized and 0 <= idx < len(user.practices)):
+                logger.warning(f"[PRACTICE_SINGLE] Доступ запрещён | authorized={user.is_authorized} | idx={idx} | practices_len={len(user.practices)}")
+                await cb.answer("Доступ ограничен", show_alert=True)
+                return
 
-    if action == "play":
-        if user.temp_playing_practice == idx:
-            await cb.answer("Практика уже запущена!", show_alert=True)
-            return
-        user.temp_playing_practice = idx
-        # ← Здесь начинается практика после нажатия "Начать"
+            title = user.practices[idx]
+            logger.info(f"[PRACTICE_SINGLE] Практика: {title} (idx={idx}) | action={action}")
 
-        # 1. Вступительное видео/кружочек (если есть)
-        note_id = Config.PRACTICE_NOTES.get(idx)
-        if note_id:
-            try:
-                await cb.message.answer_video_note(note_id)
-            except Exception as e:
-                logger.error(f"Intro video error {idx}: {e}")
+            if action == "play":
+                if user.temp_playing_practice == idx:
+                    logger.info(f"[PRACTICE_SINGLE] Уже запущена эта практика, пропускаем")
+                    await cb.answer("Практика уже запущена!", show_alert=True)
+                    return
 
-        # 2. Описание практики
-        await send_practice_intro(cb.message, idx, title)
+                logger.info(f"[PRACTICE_SINGLE] Запускаем практику {idx}")
+                user.temp_playing_practice = idx
+                sess.commit()  # фиксируем флаг
 
-        # 3. Основное видео (если есть)
-        video_id = None
-        if idx < len(Config.PRACTICE_VIDEO_IDS):
-            video_id = Config.PRACTICE_VIDEO_IDS[idx]
-        if video_id:
-            try:
-                await cb.message.answer_video_note(video_id)
-            except Exception as e:
-                logger.error(f"Practice video error {idx}: {e}")
+                # 1. Вступительное видео/кружочек
+                note_id = Config.PRACTICE_NOTES.get(idx)
+                if note_id:
+                    try:
+                        logger.info(f"[PRACTICE_SINGLE] Отправляем вступительное видео_note {note_id}")
+                        await cb.message.answer_video_note(note_id)
+                    except Exception as e:
+                        logger.error(f"[PRACTICE_SINGLE] Ошибка вступительного видео_note {idx}: {e}")
 
-        # 4. Бонус-аудио (только для "Созидать жизнь")
-        bonus_audio = None
-        if idx < len(Config.PRACTICE_BONUS_AUDIO):
-            bonus_audio = Config.PRACTICE_BONUS_AUDIO[idx]
+                # 2. Описание
+                try:
+                    await send_practice_intro(cb.message, idx, title)
+                except Exception as e:
+                    logger.error(f"[PRACTICE_SINGLE] Ошибка отправки описания практики {idx}: {e}")
 
-        if bonus_audio:
-            try:
-                await cb.message.answer_audio(
-                    audio=bonus_audio,
-                    title=f"{title} — Бонус",
-                    performer=Config.PRACTICE_PERFORMERS[idx],
-                    duration=300  # пример, подставь реальную длительность если знаешь
-                )
-                await asyncio.sleep(1.5)  # небольшая пауза между аудио
-            except Exception as e:
-                logger.error(f"Bonus audio error {idx}: {e}")
+                # 3. Основное видео
+                video_id = None
+                if idx < len(Config.PRACTICE_VIDEO_IDS):
+                    video_id = Config.PRACTICE_VIDEO_IDS[idx]
+                if video_id:
+                    try:
+                        logger.info(f"[PRACTICE_SINGLE] Отправляем основное видео_note {video_id}")
+                        await cb.message.answer_video_note(video_id)
+                    except Exception as e:
+                        logger.error(f"[PRACTICE_SINGLE] Ошибка основного видео {idx}: {e}")
 
-        # 5. Основное аудио
-        audio_id = None
-        if idx < len(Config.PRACTICE_AUDIO_IDS):
-            audio_id = Config.PRACTICE_AUDIO_IDS[idx]
+                # 4. Бонус-аудио
+                bonus_audio = None
+                if idx < len(Config.PRACTICE_BONUS_AUDIO):
+                    bonus_audio = Config.PRACTICE_BONUS_AUDIO[idx]
+                if bonus_audio:
+                    try:
+                        logger.info(f"[PRACTICE_SINGLE] Отправляем бонус-аудио для {idx}")
+                        await cb.message.answer_audio(
+                            audio=bonus_audio,
+                            title=f"{title} — Бонус",
+                            performer=Config.PRACTICE_PERFORMERS[idx],
+                            duration=300
+                        )
+                        await asyncio.sleep(1.5)
+                    except Exception as e:
+                        logger.error(f"[PRACTICE_SINGLE] Ошибка бонус-аудио {idx}: {e}")
 
-        if audio_id:
-            try:
-                duration_minutes = Config.PRACTICE_DETAILS[idx]["duration"]
-                await cb.message.answer_audio(
-                    audio=audio_id,
-                    title=title,
-                    performer=Config.PRACTICE_PERFORMERS[idx],
-                    duration=duration_minutes * 60
-                )
-            except Exception as e:
-                logger.error(f"Main audio error {idx}: {e}")
-                await cb.message.answer("Не удалось загрузить основное аудио 😔")
+                # 5. Основное аудио
+                audio_id = None
+                if idx < len(Config.PRACTICE_AUDIO_IDS):
+                    audio_id = Config.PRACTICE_AUDIO_IDS[idx]
+                if audio_id:
+                    try:
+                        duration_minutes = Config.PRACTICE_DETAILS[idx]["duration"]
+                        logger.info(f"[PRACTICE_SINGLE] Отправляем основное аудио {audio_id} (длительность ~{duration_minutes} мин)")
+                        await cb.message.answer_audio(
+                            audio=audio_id,
+                            title=title,
+                            performer=Config.PRACTICE_PERFORMERS[idx],
+                            duration=duration_minutes * 60
+                        )
+                    except Exception as e:
+                        logger.error(f"[PRACTICE_SINGLE] Ошибка основного аудио {idx}: {e}")
+                        await cb.message.answer("Не удалось загрузить основное аудио 😔")
 
-        await cb.message.answer(
-            "Практика завершена! ✨\n\nХочешь повторить или перейти к следующей?",
-            reply_markup=kb_practices_list(user.practices)
-        )
+                # Завершение
+                try:
+                    await cb.message.answer(
+                        "Практика завершена! ✨\n\nХочешь повторить или перейти к следующей?",
+                        reply_markup=kb_practices_list(user.practices)
+                    )
+                    # Важно! Сбрасываем флаг после завершения
+                    user.temp_playing_practice = None
+                    sess.commit()
+                    logger.info(f"[PRACTICE_SINGLE] Практика {idx} успешно завершена, флаг сброшен")
+                except Exception as e:
+                    logger.error(f"[PRACTICE_SINGLE] Ошибка финального сообщения: {e}")
 
-        await cb.answer("Практика началась!")
+                await cb.answer("Практика началась!")
 
-    else:
-        # ← Просто открыли карточку практики (показ описания + кнопка Начать)
+            else:  # Просто открытие карточки
+                logger.info(f"[PRACTICE_SINGLE] Открываем карточку практики {idx}")
+                try:
+                    await send_practice_intro(cb.message, idx, title)
+                    await cb.message.answer(
+                        f"<b>{title}</b>\n\nГотовы приступить к практике?",
+                        reply_markup=kb_practice_card(idx)
+                    )
+                except Exception as e:
+                    logger.error(f"[PRACTICE_SINGLE] Ошибка при показе карточки {idx}: {e}")
+                    await cb.message.answer("Не удалось показать описание практики 😔")
 
-        await send_practice_intro(cb.message, idx, title)
+            await cb.answer()
 
-        # Можно ещё добавить короткое превью или просто кнопку
-        await cb.message.answer(
-            f"<b>{title}</b>\n\nГотовы приступить к практике?",
-            reply_markup=kb_practice_card(idx)
-        )
+    except Exception as e:
+        logger.exception(f"[PRACTICE_SINGLE] Критическая ошибка обработки практики | user_id={cb.from_user.id} | data={cb.data}")
+        await notify_admin(f"Паника в PRACTICE_SINGLE!\nUser: {cb.from_user.id}\nData: {cb.data}\nError: {e}")
+        await cb.answer("Произошла ошибка при работе с практикой 😔\nПопробуйте позже", show_alert=True)
 
-        await cb.answer()
 
 # ========== REDEEM ==========
 @r.callback_query(F.data == CallbackData.REDEEM_START.value)
@@ -2697,8 +2747,15 @@ async def on_text(message: Message):
 
     if text in {"меню", "/menu"}:
         await cmd_menu(message)
-    elif text in {"мои практики", "практики"}:
-        await cb_practices(type("obj", (), {"from_user": message.from_user, "message": message, "answer": lambda *a, **k: None, "data": ""})())
+    elif text.lower() in {"мои практики", "практики", "практика"}:
+            fake_cb = type("FakeCB", (), {
+                "from_user": message.from_user,
+                "message": message,
+                "data": CallbackData.PRACTICES.value,
+                "answer": lambda *a, **kw: None,
+            })()
+            await cb_practices_list(fake_cb)
+            return
     elif text in {"личный кабинет", "кабинет"}:
         await cb_cabinet(type("obj", (), {"from_user": message.from_user, "message": message, "answer": lambda *a, **k: None})())
     elif text in {"заказать"}:
