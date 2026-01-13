@@ -1333,7 +1333,7 @@ async def cb_single_practice(cb: CallbackQuery):
                 await cb.answer("Ошибка доступа", show_alert=True)
                 return
 
-            logger.info(f"[PRACTICE_SINGLE] Пользователь найден | authorized={user.is_authorized} | temp_playing={user.temp_playing_practice}")
+            logger.info(f"[PRACTICE_SINGLE] Пользователь найден | authorized={user.is_authorized}")
 
             parts = cb.data.split(":")
             action = parts[1] if len(parts) > 1 else None
@@ -1356,15 +1356,6 @@ async def cb_single_practice(cb: CallbackQuery):
             logger.info(f"[PRACTICE_SINGLE] Практика: {title} (idx={idx}) | action={action}")
 
             if action == "play":
-                if user.temp_playing_practice == idx:
-                    logger.info(f"[PRACTICE_SINGLE] Уже запущена эта практика, пропускаем")
-                    await cb.answer("Практика уже запущена!", show_alert=True)
-                    return
-
-                logger.info(f"[PRACTICE_SINGLE] Запускаем практику {idx}")
-                user.temp_playing_practice = idx
-                sess.commit()  # фиксируем флаг
-
                 # 1. Вступительное видео/кружочек
                 note_id = Config.PRACTICE_NOTES.get(idx)
                 if note_id:
@@ -1432,10 +1423,6 @@ async def cb_single_practice(cb: CallbackQuery):
                         "Практика завершена! ✨\n\nХочешь повторить или перейти к следующей?",
                         reply_markup=kb_practices_list(user.practices)
                     )
-                    # Важно! Сбрасываем флаг после завершения
-                    user.temp_playing_practice = None
-                    sess.commit()
-                    logger.info(f"[PRACTICE_SINGLE] Практика {idx} успешно завершена, флаг сброшен")
                 except Exception as e:
                     logger.error(f"[PRACTICE_SINGLE] Ошибка финального сообщения: {e}")
 
