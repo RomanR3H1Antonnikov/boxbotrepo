@@ -2501,12 +2501,12 @@ async def on_message_router(message: Message):
             pvz_list = await find_best_pvz(text)
             if not pvz_list:
                 await message.answer(
-                    "Не нашёл ПВЗ по этому адресу 😔\n\n"
-                    "Попробуйте:\n"
-                    "• Указать только улицу и номер дома\n"
-                    "• Указать город (например: Звенигород, квартал Маяковского 6)\n"
-                    "• Написать короче или по-другому\n\n"
-                    "Просто введите новый вариант адреса - я поищу заново.",
+                    f"Не удалось точно найти ПВЗ по запросу «{text}» 😔\n\n"
+                    "Показываю **все** пункты выдачи в этом городе.\n"
+                    "Если среди них есть нужный - выбирайте.\n\n"
+                    "Если всё равно не то - попробуйте ввести адрес чуть иначе "
+                    "(например, без города, или только улицу + номер дома), или введите код пункта выдачи.\n\n"
+                    "Или напишите в поддержку @anbolshakowa — подберём вручную.",
                     reply_markup=create_inline_keyboard([
                         [{"text": "Ввести адрес ПВЗ вручную в поддержку", "callback_data": "pvz_manual"}],
                         [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
@@ -2974,61 +2974,75 @@ def filter_pvz_by_distance(pvz_list: List[dict], max_distance_m: int = 6000) -> 
     return filtered
 
 async def find_best_pvz(address_query: str, city: str = None, limit: int = 12) -> List[dict]:
+    original_query = address_query.strip()  # сохраняем оригинал для лога и сообщения
+
     # 1. Определяем город
     city_code = None
-    query_lower = address_query.lower().strip()
+    query_lower = original_query.lower()
 
-    # Проверяем, ввели ли код ПВЗ (например YAR12, KZN45, NN123, MSK9999)
+    # Прямой ввод кода ПВЗ
     if re.fullmatch(r'[A-Z]{2,5}\d{2,6}', query_lower.upper()):
         code = query_lower.upper()
         logger.info(f"Пользователь ввёл код ПВЗ напрямую: {code}")
-        # Ищем по всей России
         all_points = await get_cdek_pvz_list("", city_code=None, limit=2000)
         exact = [p for p in all_points if str(p.get("code", "")).upper() == code]
         if exact:
+            logger.info(f"Найден точный ПВЗ по коду {code}")
             return exact[:limit]
         else:
             logger.info(f"Код {code} не найден даже по всей России")
             return []
 
-    # 2. Обычный адрес → пытаемся понять город
-    parts = [p.strip() for p in address_query.split(",") if p.strip()]
+    # 2. Определение города
+    parts = [p.strip() for p in original_query.split(",") if p.strip()]
     first_part = parts[0] if parts else ""
 
     if first_part in Config.POPULAR_CITIES:
         city_code = int(Config.POPULAR_CITIES[first_part])
     else:
-        # Пробуем определить город по названию
         city_code = await get_cdek_city_code(first_part)
 
     if city_code is None:
-        city_code = 44  # Москва — самый надёжный fallback
+        city_code = 44  # Москва по умолчанию
 
-    logger.info(f"Город → {first_part!r} → code {city_code}")
+    logger.info(f"Город → {first_part!r} → code {city_code} | оригинальный запрос: {original_query}")
 
-    # 3. Получаем все ПВЗ города
+    # 3. Все ПВЗ в городе
     pts = await get_cdek_pvz_list("", city_code=city_code, limit=1000)
     if not pts:
+        logger.warning(f"Нет ПВЗ в городе code={city_code}")
         return []
 
-    # 4. Применяем мягкий матчер
-    matcher = _make_exact_matcher(address_query)
+    # 4. Пытаемся найти матчинг
+    matcher = _make_exact_matcher(original_query)
     filtered = [p for p in pts if matcher(p)]
 
-    # 5. Если совсем ничего → даём все ПВЗ города (последний шанс)
+    # 5. Fallback — если ничего не нашли, показываем все
     if not filtered:
-        logger.warning("Матчер ничего не нашёл → отдаём все ПВЗ города (fallback)")
-        filtered = pts
+        logger.warning(
+            f"Матчер ничего не нашёл по запросу '{original_query}' "
+            f"(город code={city_code}, найдено всего ПВЗ: {len(pts)})"
+        )
+        logger.info("=== Показываем пользователю ВСЕ ПВЗ города (fallback) ===")
 
-    # 6. Сортировка (если есть расстояние — по нему, иначе просто первые)
+        # Логируем все предложенные пункты (очень полезно для отладки!)
+        for i, pvz in enumerate(pts[:30], 1):  # первые 30, чтобы лог не раздувался
+            code = pvz.get("code")
+            addr = (pvz.get("location") or {}).get("address_full") or (pvz.get("location") or {}).get("address") or "—"
+            dist = pvz.get("distance", "—")
+            logger.info(f"  {i:2}. {code} | {dist}m | {addr}")
+
+        logger.info("=== Конец списка fallback ПВЗ ===")
+
+        filtered = pts  # отдаём все
+
+    # 6. Сортировка
     if any("distance" in p for p in filtered):
         filtered.sort(key=lambda p: p.get("distance") or 999999)
     else:
-        # просто первые 30
         filtered = filtered[:30]
 
     return filtered[:limit]
-
 
 
 def format_pvz_button(pvz: dict, index: int) -> dict:
