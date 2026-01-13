@@ -1336,6 +1336,7 @@ async def cb_redeem_start(cb: CallbackQuery):
     user.awaiting_redeem_code = True
     logger.info(f"Пользователь {user.telegram_id} начал ввод кода → awaiting_redeem_code = True")
     sess.commit()
+    await asyncio.sleep(0.4)
     await cb.message.answer(
         "Введите <b>код с карточки</b>:",
         reply_markup=create_inline_keyboard([
@@ -1343,7 +1344,6 @@ async def cb_redeem_start(cb: CallbackQuery):
             [{"text": "Назад в кабинет", "callback_data": CallbackData.CABINET.value}]
         ])
     )
-    sess.commit()
     await cb.answer()
 
 
@@ -2320,6 +2320,8 @@ async def on_message_router(message: Message):
         # ───────────────────────────────────────────────
         # САМЫЙ ВЕРХ — проверка активации кода (самый высокий приоритет!)
         # ───────────────────────────────────────────────
+        logger.info(
+            f"Получено сообщение '{text}' от {user.telegram_id}, awaiting_redeem_code = {user.awaiting_redeem_code}")
         if user.awaiting_redeem_code:
             if not CODE_RE.match(text):
                 await message.answer("Код должен состоять из 4 цифр. Попробуйте ещё раз.")
