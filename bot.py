@@ -2715,8 +2715,6 @@ async def handle_admin_command(message: Message, text: str):
             await message.answer("Неизвестное действие. Доступно: list, ready, shipped, archived")
 
 # ========== НОВЫЕ ФУНКЦИИ СДЭК ==========
-
-@lru_cache(maxsize=300)
 async def get_cdek_city_code(city_name: str) -> Optional[int]:
     token = await get_cdek_token()
     if not token:
