@@ -2727,27 +2727,42 @@ async def get_cdek_pvz_list(address_query: str, city_code: Optional[int] = None,
 
 def _shorten_address(address: str) -> str:
     if not address:
+        logger.info("shorten_address: вход пустой → возврат 'ПВЗ СДЭК'")
         return "ПВЗ СДЭК"
+
+    logger.info(f"shorten_address: исходный адрес = {address!r}")
 
     # Берём часть после последней запятой — обычно это улица + дом
     parts = [p.strip() for p in address.split(',')]
+    logger.info(f"shorten_address: после split по запятой = {parts}")
+
     if len(parts) >= 2:
-        street_house = parts[-1]  # последняя часть — почти всегда улица + дом
+        street_house = parts[-1]
     else:
         street_house = address
 
-    # Убираем только очевидный мусор в начале/конце
+    logger.info(f"shorten_address: выбрана часть = {street_house!r}")
+
+    # Убираем очевидный мусор
     street_house = re.sub(r'^(Россия|Москва|г\.|обл\.|край|Республика)\s*[,;]?\s*', '', street_house, flags=re.I)
     street_house = re.sub(r'\s*(Россия|Москва|г\.|обл\.|край|Республика)$', '', street_house, flags=re.I)
 
-    # Убираем лишние пробелы
+    logger.info(f"shorten_address: после удаления префиксов/суффиксов = {street_house!r}")
+
+    # Нормализация пробелов
     street_house = re.sub(r'\s+', ' ', street_house).strip()
 
-    # Если всё ещё длиннее 38 символов — обрезаем с многоточием
-    if len(street_house) > 38:
-        street_house = street_house[:35] + "..."
+    logger.info(f"shorten_address: после нормализации пробелов = {street_house!r}")
 
-    return street_house or "ПВЗ СДЭК"
+    # Обрезка, если слишком длинно
+    if len(street_house) > 38:
+        old = street_house
+        street_house = street_house[:35] + "..."
+        logger.info(f"shorten_address: обрезали с {len(old)} до {len(street_house)} символов: {street_house!r}")
+
+    result = street_house or "ПВЗ СДЭК"
+    logger.info(f"shorten_address: финальный результат = {result!r}")
+    return result
 
 
 def _extract_street_house(addr: str) -> tuple[Optional[str], Optional[str]]:
@@ -3099,26 +3114,33 @@ def format_pvz_button(pvz: dict, index: int) -> dict:
     code = pvz["code"]
     loc = pvz.get("location", {}) or {}
     address = loc.get("address_full") or loc.get("address") or ""
+
+    logger.info(f"format_button #{index + 1}: code={code}, полный адрес={address!r}")
+
     short_addr = _shorten_address(address) or f"ПВЗ {code}"
+
+    logger.info(f"format_button #{index + 1}: после shorten = {short_addr!r}")
 
     dist = pvz.get("distance")
     dist_text = f" · {int(dist)}м" if isinstance(dist, (int, float)) and 0 < dist < 10000 else ""
 
     wt = (pvz.get("work_time") or "").strip()
+    time_text = ""
     if wt:
         if "круглосуточно" in wt.lower():
             time_text = " · 24/7"
         else:
-            # Берём первую строку до ;
             first_line = wt.split(";", 1)[0].strip()
-            # Обрезаем до 12 символов, чтобы не вылезти
             time_text = f" · {first_line[:12]}"
-    else:
-        time_text = ""
 
     text = f"{index + 1}. {short_addr}{dist_text}{time_text}"
+
+    logger.info(f"format_button #{index + 1}: итоговый текст кнопки = {text!r} (длина={len(text)})")
+
     if len(text) > 64:
+        old_text = text
         text = text[:61] + "..."
+        logger.info(f"format_button #{index + 1}: текст обрезан с {len(old_text)} до {len(text)}: {text!r}")
 
     return {
         "text": text,
