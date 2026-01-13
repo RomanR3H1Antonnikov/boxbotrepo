@@ -3,6 +3,7 @@ import re
 import asyncio
 import logging
 import requests
+from functools import lru_cache
 from pathlib import Path
 from collections import defaultdict
 from typing import Optional, Dict, List
@@ -351,55 +352,55 @@ class Config:
 
     # Популярные города (для быстрого выбора)
     # Внутри класса Config:
-    POPULAR_CITIES = {
-        "Москва": "44",
-        "Санкт-Петербург": "137",
-        "Новосибирск": "157",
-        "Екатеринбург": "195",
-        "Казань": "138",
-        "Нижний Новгород": "152",
-        "Челябинск": "163",
-        "Красноярск": "153",
-        "Самара": "149",
-        "Уфа": "154",
-        "Ростов-на-Дону": "161",
-        "Омск": "158",
-        "Краснодар": "151",
-        "Воронеж": "148",
-        "Пермь": "248",
-        "Волгоград": "147",
-        "Саратов": "150",
-        "Тюмень": "162",
-        "Тольятти": "149",  # дубликат, но оставляем
-        "Ижевск": "140",
-        "Барнаул": "156",
-        "Ульяновск": "155",
-        "Иркутск": "159",
-        "Хабаровск": "160",
-        "Ярославль": "164",
-        "Махачкала": "165",
-        "Владивосток": "166",
-        "Оренбург": "167",
-        "Томск": "168",
-        "Кемерово": "169",
-        "Калининград": "145",
-        "Вологда": "136",
-        "Сургут": "250",
-        "Тверь": "172",
-        "Брянск": "132",
-        "Липецк": "146",
-        "Курск": "143",
-        "Белгород": "131",
-        "Калуга": "142",
-        "Смоленск": "170",
-        "Пенза": "159",
-        "Рязань": "162",
-        "Орел": "157",
-        "Тула": "173",
-        "Якутск": "174",
-        "Мурманск": "155",
-        "Архангельск": "130",
-    }
+    # POPULAR_CITIES = {
+    #     "Москва": "44",
+    #     "Санкт-Петербург": "137",
+    #     "Новосибирск": "157",
+    #     "Екатеринбург": "195",
+    #     "Казань": "138",
+    #     "Нижний Новгород": "152",
+    #     "Челябинск": "163",
+    #     "Красноярск": "153",
+    #     "Самара": "149",
+    #     "Уфа": "154",
+    #     "Ростов-на-Дону": "161",
+    #     "Омск": "158",
+    #     "Краснодар": "151",
+    #     "Воронеж": "148",
+    #     "Пермь": "248",
+    #     "Волгоград": "147",
+    #     "Саратов": "150",
+    #     "Тюмень": "162",
+    #     "Тольятти": "149",  # дубликат, но оставляем
+    #     "Ижевск": "140",
+    #     "Барнаул": "156",
+    #     "Ульяновск": "155",
+    #     "Иркутск": "159",
+    #     "Хабаровск": "160",
+    #     "Ярославль": "164",
+    #     "Махачкала": "165",
+    #     "Владивосток": "166",
+    #     "Оренбург": "167",
+    #     "Томск": "168",
+    #     "Кемерово": "169",
+    #     "Калининград": "145",
+    #     "Вологда": "136",
+    #     "Сургут": "250",
+    #     "Тверь": "172",
+    #     "Брянск": "132",
+    #     "Липецк": "146",
+    #     "Курск": "143",
+    #     "Белгород": "131",
+    #     "Калуга": "142",
+    #     "Смоленск": "170",
+    #     "Пенза": "159",
+    #     "Рязань": "162",
+    #     "Орел": "157",
+    #     "Тула": "173",
+    #     "Якутск": "174",
+    #     "Мурманск": "155",
+    #     "Архангельск": "130",
+    # }
 
 # ========== ADMIN ==========
 ADMIN_USERNAMES = {"@RE_HY"}
@@ -2715,6 +2716,7 @@ async def handle_admin_command(message: Message, text: str):
 
 # ========== НОВЫЕ ФУНКЦИИ СДЭК ==========
 
+@lru_cache(maxsize=300)
 async def get_cdek_city_code(city_name: str) -> Optional[int]:
     token = await get_cdek_token()
     if not token:
@@ -2724,16 +2726,23 @@ async def get_cdek_city_code(city_name: str) -> Optional[int]:
     params = {"city": city_name.strip()}
 
     try:
-        r = await asyncio.to_thread(requests.get, url, params=params, headers={"Authorization": f"Bearer {token}"}, timeout=15)
+        r = await asyncio.to_thread(
+            requests.get,
+            url,
+            params=params,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15
+        )
         if r.status_code == 200:
             cities = r.json()
             if cities:
-                logger.info(f"Город '{city_name}' → code {cities[0].get('code')}")
-                return cities[0].get("code")
-        else:
-            logger.warning(f"Ошибка поиска города: {r.status_code} {r.text}")
+                code = cities[0].get('code')
+                logger.info(f"Город '{city_name}' → code {code}")
+                return code
+        logger.warning(f"Ошибка поиска города '{city_name}': {r.status_code} {r.text}")
     except Exception as e:
-        logger.error(f"Ошибка get_cdek_city_code: {e}")
+        logger.error(f"Исключение при поиске города '{city_name}': {e}")
+
     return None
 
 
@@ -2974,75 +2983,112 @@ def filter_pvz_by_distance(pvz_list: List[dict], max_distance_m: int = 6000) -> 
     return filtered
 
 async def find_best_pvz(address_query: str, city: str = None, limit: int = 12) -> List[dict]:
-    original_query = address_query.strip()  # сохраняем оригинал для лога и сообщения
+    """
+    Основная функция поиска ПВЗ:
+    - Пытается определить город через API
+    - Если не получилось — fallback на Москву
+    - Возвращает список ПВЗ в этом городе (до limit штук)
+    """
+    original_query = address_query.strip()
+    logger.info(f"Поиск ПВЗ по запросу: {original_query!r}")
 
-    # 1. Определяем город
-    city_code = None
-    query_lower = original_query.lower()
+    # ───────────────────────────────────────────────
+    # 1. Пользователь ввёл код ПВЗ напрямую (MSK123, SPB45 и т.п.)
+    # ───────────────────────────────────────────────
+    if re.fullmatch(r'[A-Z]{2,5}\d{2,6}', original_query.upper()):
+        code = original_query.upper()
+        logger.info(f"Обнаружен прямой ввод кода ПВЗ: {code}")
 
-    # Прямой ввод кода ПВЗ
-    if re.fullmatch(r'[A-Z]{2,5}\d{2,6}', query_lower.upper()):
-        code = query_lower.upper()
-        logger.info(f"Пользователь ввёл код ПВЗ напрямую: {code}")
-        all_points = await get_cdek_pvz_list("", city_code=None, limit=2000)
+        all_points = await get_cdek_pvz_list("", city_code=None, limit=3000)
         exact = [p for p in all_points if str(p.get("code", "")).upper() == code]
+
         if exact:
             logger.info(f"Найден точный ПВЗ по коду {code}")
             return exact[:limit]
         else:
-            logger.info(f"Код {code} не найден даже по всей России")
+            logger.warning(f"Код {code} не найден даже по всей России")
             return []
 
-    # 2. Определение города
-    parts = [p.strip() for p in original_query.split(",") if p.strip()]
-    first_part = parts[0] if parts else ""
+    # ───────────────────────────────────────────────
+    # 2. Пытаемся выделить название города из запроса
+    # ───────────────────────────────────────────────
+    city_name_candidate = None
 
-    if first_part in Config.POPULAR_CITIES:
-        city_code = int(Config.POPULAR_CITIES[first_part])
+    # Вариант А: есть запятая → берём всё до первой запятой
+    if ',' in original_query:
+        city_name_candidate = original_query.split(',', 1)[0].strip()
+
+    # Вариант Б: нет запятой → берём первые 1–2 слова
     else:
-        city_code = await get_cdek_city_code(first_part)
+        words = original_query.split()
+        if len(words) >= 2:
+            city_name_candidate = ' '.join(words[:2])
+        elif words:
+            city_name_candidate = words[0]
 
+    city_code = None
+
+    if city_name_candidate:
+        city_code = await get_cdek_city_code(city_name_candidate)
+
+        if city_code:
+            logger.info(f"Успешно найден код города '{city_name_candidate}' → {city_code}")
+        else:
+            logger.warning(f"Не удалось найти код города по '{city_name_candidate}'")
+
+    # ───────────────────────────────────────────────
+    # 3. Если город не найден — fallback на Москву
+    # ───────────────────────────────────────────────
     if city_code is None:
-        city_code = 44  # Москва по умолчанию
+        city_code = 44
+        logger.warning(
+            f"Город не определён по запросу '{original_query}'. "
+            f"Используем Москву (44) как fallback"
+        )
 
-    logger.info(f"Город → {first_part!r} → code {city_code} | оригинальный запрос: {original_query}")
+    # Можно добавить уведомление пользователю (опционально)
+    # if city_code == 44 and city_name_candidate:
+    #     await message.answer(
+    #         f"Не удалось точно определить город «{city_name_candidate}».\n"
+    #         "Для поиска ПВЗ используется Москва.\n\n"
+    #         "Попробуйте указать город явно в начале, например:\n"
+    #         "Казань, Баумана 15\nЕкатеринбург, Ленина 50",
+    #         reply_markup=create_inline_keyboard([[{"text": "Ввести заново", "callback_data": "pvz_reenter"}]])
+    #     )
 
-    # 3. Все ПВЗ в городе
+    logger.info(f"Итоговый city_code для поиска ПВЗ: {city_code}")
+
+    # ───────────────────────────────────────────────
+    # 4. Получаем все ПВЗ в определённом городе
+    # ───────────────────────────────────────────────
     pts = await get_cdek_pvz_list("", city_code=city_code, limit=1000)
+
     if not pts:
-        logger.warning(f"Нет ПВЗ в городе code={city_code}")
+        logger.warning(f"Не найдено ни одного ПВЗ для city_code={city_code}")
         return []
 
-    # 4. Пытаемся найти матчинг
+    logger.info(f"Найдено {len(pts)} пунктов выдачи в городе с code={city_code}")
+
+    # ───────────────────────────────────────────────
+    # 5. Фильтруем по адресу (если запрос выглядит как адрес)
+    # ───────────────────────────────────────────────
     matcher = _make_exact_matcher(original_query)
     filtered = [p for p in pts if matcher(p)]
 
-    # 5. Fallback — если ничего не нашли, показываем все
+    # Если ничего не нашли по матчингу — показываем все ПВЗ города
     if not filtered:
-        logger.warning(
-            f"Матчер ничего не нашёл по запросу '{original_query}' "
-            f"(город code={city_code}, найдено всего ПВЗ: {len(pts)})"
-        )
-        logger.info("=== Показываем пользователю ВСЕ ПВЗ города (fallback) ===")
+        logger.info("Фильтр по адресу ничего не нашёл → возвращаем все ПВЗ города")
+        filtered = pts
 
-        # Логируем все предложенные пункты (очень полезно для отладки!)
-        for i, pvz in enumerate(pts[:30], 1):  # первые 30, чтобы лог не раздувался
-            code = pvz.get("code")
-            addr = (pvz.get("location") or {}).get("address_full") or (pvz.get("location") or {}).get("address") or "—"
-            dist = pvz.get("distance", "—")
-            logger.info(f"  {i:2}. {code} | {dist}m | {addr}")
-
-        logger.info("=== Конец списка fallback ПВЗ ===")
-
-        filtered = pts  # отдаём все
-
-    # 6. Сортировка
+    # Сортировка по расстоянию, если есть
     if any("distance" in p for p in filtered):
         filtered.sort(key=lambda p: p.get("distance") or 999999)
-    else:
-        filtered = filtered[:30]
 
-    return filtered[:limit]
+    # Ограничиваем количество
+    result = filtered[:limit]
+
+    logger.info(f"Возвращаем {len(result)} лучших ПВЗ")
+    return result
 
 
 def format_pvz_button(pvz: dict, index: int) -> dict:
