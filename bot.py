@@ -822,7 +822,7 @@ def kb_empty_practices() -> InlineKeyboardMarkup:
     ])
 
 def kb_practices_list(titles: List[str]) -> InlineKeyboardMarkup:
-    rows = [[{"text": f"{i+1}. {t}", "callback_data": f"practice:{i}"}] for i, t in enumerate(titles)]
+    rows = [[{"text": f"{i+1}. {t}", "callback_data": f"practice:view:{i}"}] for i, t in enumerate(titles)]
     rows.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
     return create_inline_keyboard(rows)
 
@@ -1335,20 +1335,40 @@ async def cb_single_practice(cb: CallbackQuery):
 
             logger.info(f"[PRACTICE_SINGLE] Пользователь найден | authorized={user.is_authorized}")
 
-            parts = cb.data.split(":")
-            action = parts[1] if len(parts) > 1 else None
-            idx_str = parts[2] if len(parts) > 2 else None
+            data = cb.data
+            if not data.startswith("practice:"):
+                await cb.answer("Неверный формат команды", show_alert=True)
+                return
 
-            if not idx_str or not idx_str.isdigit():
-                logger.warning(f"[PRACTICE_SINGLE] Некорректный callback_data: {cb.data}")
+            parts = data.split(":", 2)  # делим максимум на 3 части
+            # Возможные варианты:
+            # "practice:5"          → ["practice", "5"]          → просмотр карточки
+            # "practice:play:3"     → ["practice", "play", "3"]  → запуск практики
+
+            if len(parts) == 2:
+                # Просто номер → открываем карточку
+                action = None
+                idx_str = parts[1]
+            elif len(parts) == 3 and parts[1] == "play":
+                # play + номер → запускаем
+                action = "play"
+                idx_str = parts[2]
+            else:
+                logger.warning(f"[PRACTICE_SINGLE] Некорректный callback_data: {data}")
+                await cb.answer("Ошибка формата команды", show_alert=True)
+                return
+
+            if not idx_str.isdigit():
+                logger.warning(f"[PRACTICE_SINGLE] Номер практики не число: {idx_str}")
                 await cb.answer("Ошибка формата команды", show_alert=True)
                 return
 
             idx = int(idx_str)
-            logger.info(f"[PRACTICE_SINGLE] Запрошена практика №{idx}")
+            logger.info(f"[PRACTICE_SINGLE] Запрошена практика №{idx} | action={action}")
 
             if not (user.is_authorized and 0 <= idx < len(user.practices)):
-                logger.warning(f"[PRACTICE_SINGLE] Доступ запрещён | authorized={user.is_authorized} | idx={idx} | practices_len={len(user.practices)}")
+                logger.warning(
+                    f"[PRACTICE_SINGLE] Доступ запрещён | authorized={user.is_authorized} | idx={idx} | practices_len={len(user.practices)}")
                 await cb.answer("Доступ ограничен", show_alert=True)
                 return
 
