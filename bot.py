@@ -294,6 +294,15 @@ class Config:
         "Дыхательная практика", "Зеркало", "Снять тревогу с тревоги",
         "Внутренний ребенок", "Антихрупкость", "Созидать жизнь", "Спокойный сон",
     ]
+    PRACTICE_PERFORMERS = [
+        "Алексей Большаков",  # 0
+        "Анна Большакова",  # 1
+        "Мария Горелко",  # 2
+        "Алёна Махонина",  # 3
+        "Алексей Большаков",  # 4
+        "Алексей Большаков",  # 5
+        "Александр Верховский",  # 6
+    ]
     PRACTICE_DETAILS = [
         {"duration": 40, "desc": "Единственное в своем теле, что ты можешь контролировать - это дыхание..."},
         {"duration": 15, "desc": "Когда ты есть у себя, когда ты чувствуешь опору в себе..."},
@@ -306,7 +315,7 @@ class Config:
     PRACTICE_AUDIO_IDS = [
         os.getenv("AUDIO1_ID"),
         os.getenv("AUDIO2_ID"),
-        os.getenv("AUDIO3_ID"),
+        None,
         os.getenv("AUDIO4_ID"),
         os.getenv("AUDIO5_ID"),
         os.getenv("AUDIO6_ID"),
@@ -314,7 +323,7 @@ class Config:
     ]
 
     PRACTICE_VIDEO_IDS = [  # только для тех, где есть видео
-        None, None, None, None, None, os.getenv("VIDEO_PRACTICE6_ID"), os.getenv("VIDEO_PRACTICE7_ID")
+        os.getenv("VIDEO_PRACTICE1_ID"), None, os.getenv("VIDEO_PRACTICE3_ID"), None, None, None, None
     ]
     WELCOME_TEXT = ("Привет! Я тебе очень и очень рада. Меня зовут Анна Большакова, но"
                     " сейчас я буду говорить от имени коробочки. Я создана для тебя, чтобы тебе всегда"
@@ -1284,41 +1293,77 @@ async def cb_open_practice(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
+
     parts = cb.data.split(":")
     if len(parts) >= 3 and parts[1] == "play":
-        await cb.answer(); return
+        # Здесь можно будет реализовать запуск (например, отправить всё сразу)
+        await cb.answer("Практика запущена! (пока просто заглушка)", show_alert=True)
+        return
+
     try:
         idx = int(parts[1])
     except:
         await cb.message.answer("Ошибка.", reply_markup=kb_practices_list(user.practices))
-        await cb.answer(); return
+        await cb.answer()
+        return
+
     if not (user.is_authorized and 0 <= idx < len(user.practices)):
         await cb.message.answer("Доступ ограничен.", reply_markup=kb_practices_list(user.practices))
-        await cb.answer(); return
+        await cb.answer()
+        return
+
     title = user.practices[idx]
+
+    # Вступительное видео/кружочек (если есть)
     note_id = Config.PRACTICE_NOTES.get(idx)
     if note_id:
         try:
             await cb.message.answer_video_note(note_id)
         except Exception as e:
-            logger.error(f"Practice video error: {e}")
-    await send_practice_intro(cb.message, idx, title)
-    audio_id = Config.PRACTICE_AUDIO_IDS[idx] if idx < len(Config.PRACTICE_AUDIO_IDS) else None
-    video_id = Config.PRACTICE_VIDEO_IDS[idx] if idx < len(Config.PRACTICE_VIDEO_IDS) else None
+            logger.error(f"Practice intro video error {idx}: {e}")
 
+    await send_practice_intro(cb.message, idx, title)
+
+    # Основное видео (если есть)
+    video_id = None
+    if idx < len(Config.PRACTICE_VIDEO_IDS):
+        video_id = Config.PRACTICE_VIDEO_IDS[idx]
     if video_id:
-        await cb.message.answer_video_note(video_id)
+        try:
+            await cb.message.answer_video_note(video_id)
+        except Exception as e:
+            logger.error(f"Practice video error {idx}: {e}")
+
+    # Аудио (основное)
+    audio_id = None
+    if idx < len(Config.PRACTICE_AUDIO_IDS):
+        audio_id = Config.PRACTICE_AUDIO_IDS[idx]
+
     if audio_id:
-        # Берём длительность из Config.PRACTICE_DETAILS
-        duration_minutes = Config.PRACTICE_DETAILS[idx]["duration"]
-        await cb.message.answer_audio(
-            audio=audio_id,
-            title=title,
-            performer="Анна Большакова",
-            duration=duration_minutes * 60  # в секундах, как требует Telegram
-        )
-    await cb.message.answer(f"<b>Практика:</b> {title}\n\nНачинаем?", reply_markup=kb_practice_card(idx))
-    sess.commit()
+        try:
+            duration_minutes = Config.PRACTICE_DETAILS[idx]["duration"]
+            performer = (
+                Config.PRACTICE_PERFORMERS[idx]
+                if idx < len(Config.PRACTICE_PERFORMERS)
+                else "Анна Большакова"
+            )
+
+            await cb.message.answer_audio(
+                audio=audio_id,
+                title=title,
+                performer=performer,
+                duration=duration_minutes * 60
+            )
+        except Exception as e:
+            logger.error(f"Audio send error {idx}: {e}")
+            await cb.message.answer("Не удалось загрузить аудио этой практики 😔")
+
+    # Финальное приглашение начать
+    await cb.message.answer(
+        f"<b>Практика:</b> {title}\n\nГотовы начать?",
+        reply_markup=kb_practice_card(idx)
+    )
+
     await cb.answer()
 
 # ========== REDEEM ==========
@@ -2352,24 +2397,34 @@ async def on_message_router(message: Message):
             # Успешная активация
             Config.CODES_POOL.remove(code)
             user.awaiting_redeem_code = False
-            logger.info(f"Пользователь {user.telegram_id} завершил/отменил ввод кода → awaiting_redeem_code = False")
+            logger.info(f"Пользователь {user.telegram_id} завершил ввод кода → awaiting_redeem_code = False")
 
+            added_count = 0
             if not user.practices:
                 user.practices = []
 
             for practice in Config.DEFAULT_PRACTICES:
                 if practice not in user.practices:
                     user.practices.append(practice)
+                    added_count += 1
 
-            user.awaiting_redeem_code = False
             sess.commit()
 
-            await message.answer(
-                "🎉 Код активирован!\n\n"
-                "Теперь у тебя есть доступ ко всем 7 практикам навсегда ❤️\n"
-                "Перейди в раздел «Мои практики»",
-                reply_markup=kb_practices_list(user.practices)
-            )
+            if added_count > 0:
+                await message.answer(
+                    f"🎉 Код активирован!\n\n"
+                    f"Добавлено новых практик: {added_count}\n"
+                    "Теперь у тебя есть доступ ко всем практикам навсегда ❤️\n"
+                    "Перейди в раздел «Мои практики»",
+                    reply_markup=kb_practices_list(user.practices)
+                )
+            else:
+                await message.answer(
+                    "Этот код уже был активирован ранее (или все практики уже открыты).\n"
+                    "У тебя уже есть доступ ко всем 7 практикам! ✨\n"
+                    "Перейди в «Мои практики»",
+                    reply_markup=kb_practices_list(user.practices)
+                )
             return
 
         # ===== 1. ПОДАРОЧНОЕ ПОСЛАНИЕ =====
