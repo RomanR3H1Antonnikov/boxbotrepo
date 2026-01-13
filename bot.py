@@ -2729,20 +2729,25 @@ def _shorten_address(address: str) -> str:
     if not address:
         return "ПВЗ СДЭК"
 
-    # Убираем всё до последней запятой (город, индекс и т.д.)
-    short = address.split(",")[-1].strip()
+    # Берём часть после последней запятой — обычно это улица + дом
+    parts = [p.strip() for p in address.split(',')]
+    if len(parts) >= 2:
+        street_house = parts[-1]  # последняя часть — почти всегда улица + дом
+    else:
+        street_house = address
 
-    # Убираем "д. ", "корп. ", "к ", "стр. ", "литер " и т.п.
-    short = re.sub(r'\b(д|дом|к|корп|корпус|стр|строение|лит|литера|пом|помещение|офис|оф)\.?\s*', '', short, flags=re.IGNORECASE)
+    # Убираем только очевидный мусор в начале/конце
+    street_house = re.sub(r'^(Россия|Москва|г\.|обл\.|край|Республика)\s*[,;]?\s*', '', street_house, flags=re.I)
+    street_house = re.sub(r'\s*(Россия|Москва|г\.|обл\.|край|Республика)$', '', street_house, flags=re.I)
 
     # Убираем лишние пробелы
-    short = re.sub(r'\s+', ' ', short).strip()
+    street_house = re.sub(r'\s+', ' ', street_house).strip()
 
-    # Если всё ещё слишком длинное — обрезаем до 30 символов
-    if len(short) > 30:
-        short = short[:27] + "..."
+    # Если всё ещё длиннее 38 символов — обрезаем с многоточием
+    if len(street_house) > 38:
+        street_house = street_house[:35] + "..."
 
-    return short or "ПВЗ СДЭК"
+    return street_house or "ПВЗ СДЭК"
 
 
 def _extract_street_house(addr: str) -> tuple[Optional[str], Optional[str]]:
