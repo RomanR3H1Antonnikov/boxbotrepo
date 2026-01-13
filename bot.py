@@ -549,29 +549,30 @@ def validate_address(address: str) -> tuple[bool, str]:
 
 
 def reset_states(user):
-    user.awaiting_auth = False
-    user.awaiting_gift_message = False
-    user.awaiting_pvz_address = False
-    user.awaiting_manual_pvz = False
-    user.awaiting_manual_track = False
-    if user.awaiting_redeem_code:
-        logger.info(f"Сброс флага awaiting_redeem_code у пользователя {user.telegram_id}")
-    user.awaiting_redeem_code = False
-    user.pvz_for_order_id = None
-    user.temp_gift_order_id = None
-    user.temp_pvz_list = None
-    user.temp_selected_pvz = None
-    user.temp_order_id_for_track = None
+    # НЕ сбрасываем флаг ввода кода — он должен жить, пока пользователь не введёт код или не отменит явно
+    if not user.awaiting_redeem_code:
+        user.awaiting_auth = False
+        user.awaiting_gift_message = False
+        user.awaiting_pvz_address = False
+        user.awaiting_manual_pvz = False
+        user.awaiting_manual_track = False
+        user.pvz_for_order_id = None
+        user.temp_gift_order_id = None
+        user.temp_pvz_list = None
+        user.temp_selected_pvz = None
+        user.temp_order_id_for_track = None
 
-    # FIX: Abandon unfinished NEW orders
-    engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
-        orders = get_user_orders_db(sess, user.telegram_id)
-        for o in orders:
-            if o.status == OrderStatus.NEW.value:
-                o = sess.merge(o)
-                o.status = OrderStatus.ABANDONED.value
-        sess.commit()
+        # Abandon unfinished NEW orders
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            orders = get_user_orders_db(sess, user.telegram_id)
+            for o in orders:
+                if o.status == OrderStatus.NEW.value:
+                    o = sess.merge(o)
+                    o.status = OrderStatus.ABANDONED.value
+            sess.commit()
+    else:
+        logger.info(f"reset_states пропущен для пользователя {user.telegram_id} — идёт ввод кода")
 
 
 # ======== ADMIN HELPERS ========
@@ -1086,9 +1087,12 @@ async def cb_menu(cb: CallbackQuery):
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         if user:
-            reset_states(user)
-            # After reset_states(user)
-            await cb.message.answer("Все текущие действия отменены. Если был незавершённый заказ - он отменён.")
+            # Не сбрасываем состояния, если ждём код
+            if not user.awaiting_redeem_code:
+                reset_states(user)
+                await cb.message.answer("Все текущие действия отменены. Если был незавершённый заказ - он отменён.")
+            else:
+                await cb.message.answer("Сейчас вы вводите код — завершите или отмените его.")
             sess.commit()
     await edit_or_send(cb.message, "Выбери действие:", kb_main())
     await cb.answer()
@@ -1332,9 +1336,26 @@ async def cb_redeem_start(cb: CallbackQuery):
     user.awaiting_redeem_code = True
     logger.info(f"Пользователь {user.telegram_id} начал ввод кода → awaiting_redeem_code = True")
     sess.commit()
-    await cb.message.answer("Введите <b>код с карточки</b>:",
-                            reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.CABINET.value}]]))
+    await cb.message.answer(
+        "Введите <b>код с карточки</b>:",
+        reply_markup=create_inline_keyboard([
+            [{"text": "Отменить", "callback_data": "redeem:cancel"}],
+            [{"text": "Назад в кабинет", "callback_data": CallbackData.CABINET.value}]
+        ])
+    )
     sess.commit()
+    await cb.answer()
+
+
+@r.callback_query(F.data == "redeem:cancel")
+async def cb_redeem_cancel(cb: CallbackQuery):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if user:
+            user.awaiting_redeem_code = False
+            sess.commit()
+    await cb.message.edit_text("Ввод кода отменён.", reply_markup=kb_cabinet())
     await cb.answer()
 
 # ========== CHECKOUT ==========
