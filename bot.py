@@ -2722,7 +2722,7 @@ async def get_cdek_city_code(city_name: str) -> Optional[int]:
     if not token:
         return None
 
-    url = "https://api.edu.cdek.ru/v2/location/cities"
+    url = "https://api.cdek.ru/v2/location/cities"
     params = {"city": city_name.strip()}
 
     try:
@@ -2888,24 +2888,31 @@ def _make_exact_matcher(address_query: str):
     """
     query = (address_query or "").strip().lower()
 
-    # 1. Убираем город, если он в начале через запятую
+    logger.info(f"Начало работы матчера для запроса: '{query}'")
+
+    # 1. Убираем город в начале, если он отделён запятой
     if ',' in query:
         parts = query.split(',', 1)
         if len(parts) > 1 and any(kw in parts[0] for kw in ["город", "г.", "г ", "г. "]):
             query = parts[1].strip()
+            logger.info(f"Убрали город в начале → новая строка: '{query}'")
 
-    # 2. Очень агрессивная нормализация
-    for old, new in [
-        ("пр-т", "проспект"), ("пр-кт", "проспект"), ("пр.", "проспект"),
+    # 2. Расширенная нормализация сокращений (особенно важно для "пр.", "пр-т", "пр-кт")
+    replacements = [
+        ("пр-т", "проспект"), ("пр-кт", "проспект"), ("пр.", "проспект"), ("пр ", "проспект "),
         ("ул.", "улица"), ("ул ", "улица "), ("пер.", "переулок"),
         ("ш.", "шоссе"), ("наб.", "набережная"), ("бул.", "бульвар"),
         ("пл.", "площадь"), ("кв.", "квартал"),
         ("д.", "дом"), ("стр.", "строение"), ("корп.", "корпус"), ("к.", "корпус"),
         ("лит.", "литера"), ("лит", "литера"),
-    ]:
+    ]
+
+    for old, new in replacements:
         query = query.replace(old, new)
 
-    # Убираем все типы улиц и лишние слова
+    logger.info(f"После замены сокращений: '{query}'")
+
+    # 3. Убираем все типы улиц и лишние слова
     query_clean = re.sub(
         r'\b(ул|улица|проспект|пр-т|пр-кт|пр|пер|переулок|ш|шоссе|бул|бульвар|'
         r'пл|площадь|наб|набережная|тракт|аллея|кв|квартал|д|дом|стр|строение|'
@@ -2917,16 +2924,19 @@ def _make_exact_matcher(address_query: str):
     query_clean = re.sub(r'[^\w\s/]', ' ', query_clean)
     query_clean = re.sub(r'\s+', ' ', query_clean).strip()
 
-    # 3. Выделяем улицу и дом
+    logger.info(f"Очищенная строка для поиска: '{query_clean}'")
+
+    # 4. Выделяем улицу и дом
     house_match = re.search(r'(\d+[а-яА-ЯёЁ0-9/\\а-яА-ЯёЁ\s.-]*\d*)', query_clean)
     house_raw = house_match.group(1).strip() if house_match else None
 
     street = re.sub(r'\d.*$', '', query_clean).strip()
 
-    # Ключевые слова улицы — берём максимально длинный кусок
-    street_key = ' '.join(street.split()[:3])[:12]  # первые 3 слова или меньше
+    # Берём максимально осмысленный кусок улицы (до 3 слов, но не больше 12 символов)
+    street_words = street.split()
+    street_key = ' '.join(street_words[:3])[:12]
 
-    logger.info(f"Matcher → street_key='{street_key}', house_raw='{house_raw}', clean='{query_clean}'")
+    logger.info(f"Выделено для поиска → street_key='{street_key}', house_raw='{house_raw}'")
 
     def matcher(pvz: dict) -> bool:
         addr_full = (pvz.get("location", {}).get("address_full") or
@@ -2936,37 +2946,40 @@ def _make_exact_matcher(address_query: str):
             return False
 
         # Очень мягкая проверка улицы
-        if street_key and len(street_key) >= 4:
+        street_ok = False
+        if street_key and len(street_key) >= 3:
             if street_key in addr_full:
-                pass  # хорошо
+                street_ok = True
             elif street_key[:7] in addr_full:
-                pass  # терпимо
-            elif any(word in addr_full for word in street_key.split() if len(word) > 3):
-                pass
-            else:
-                return False
+                street_ok = True
+            elif any(word in addr_full for word in street_key.split() if len(word) >= 4):
+                street_ok = True
         else:
-            # Если улица слишком короткая — хотя бы 4 символа из запроса
-            if len(query_clean) >= 4 and query_clean[:4] not in addr_full:
-                return False
+            # Если улицы почти нет — хотя бы начало запроса
+            if len(query_clean) >= 4 and query_clean[:4] in addr_full:
+                street_ok = True
 
         # Проверка дома — максимально гибко
+        house_ok = False
         if house_raw:
-            # Вариант 1: просто цифры
             house_digits = re.sub(r'[^\d]', '', house_raw)
             if house_digits:
                 addr_digits = re.sub(r'[^\d]', '', addr_full)
                 for ln in range(min(len(house_digits), 5), 1, -1):
                     if house_digits[:ln] in addr_digits:
-                        return True
+                        house_ok = True
+                        break
 
-            # Вариант 2: с дробью/корпусом/строением
-            if '/' in house_raw or 'к' in house_raw or 'стр' in house_raw or 'корп' in house_raw:
+            # Проверка с дробью/корпусом/строением
+            if not house_ok and ('/' in house_raw or 'к' in house_raw or 'стр' in house_raw or 'корп' in house_raw):
                 if any(h in addr_full for h in house_raw.split()):
-                    return True
+                    house_ok = True
 
-        # Если дома вообще не указали — достаточно улицы
-        return True
+        # Логируем результат сравнения для каждого ПВЗ (только в debug режиме можно включить)
+        # if street_ok and house_ok:
+        #     logger.debug(f"Совпадение! {pvz.get('code')} → {addr_full}")
+
+        return street_ok and (house_ok or not house_raw)
 
     return matcher
 
@@ -3087,7 +3100,19 @@ async def find_best_pvz(address_query: str, city: str = None, limit: int = 12) -
     # Ограничиваем количество
     result = filtered[:limit]
 
-    logger.info(f"Возвращаем {len(result)} лучших ПВЗ")
+    # Очень подробный лог того, что именно мы отдаём пользователю
+    logger.info("═" * 60)
+    logger.info(f"ФИНАЛЬНЫЙ РЕЗУЛЬТАТ — возвращаем {len(result)} ПВЗ:")
+    for i, pvz in enumerate(result, 1):
+        code = pvz.get("code", "—")
+        addr = (pvz.get("location") or {}).get("address_full") or \
+               (pvz.get("location") or {}).get("address") or "—"
+        dist = pvz.get("distance", "—")
+        dist_str = f"{int(dist)} м" if isinstance(dist, (int, float)) and dist > 0 else "—"
+        logger.info(f"  {i:2}. {code:8} | {dist_str:>8} | {addr}")
+    logger.info("═" * 60)
+
+    logger.info(f"Итого возвращено пользователю: {len(result)} пунктов")
     return result
 
 
