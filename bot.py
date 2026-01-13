@@ -822,9 +822,16 @@ def kb_empty_practices() -> InlineKeyboardMarkup:
     ])
 
 def kb_practices_list(titles: List[str]) -> InlineKeyboardMarkup:
-    rows = [[{"text": f"{i+1}. {t}", "callback_data": f"practice:view:{i}"}] for i, t in enumerate(titles)]
+    rows = [[{"text": f"{i + 1}. {t}", "callback_data": f"practice:{i}"}] for i, t in enumerate(titles)]
     rows.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
     return create_inline_keyboard(rows)
+
+
+def kb_back_to_practices() -> InlineKeyboardMarkup:
+    return create_inline_keyboard([
+        [{"text": "Назад к списку практик", "callback_data": CallbackData.PRACTICES.value}]
+    ])
+
 
 def kb_practice_card(idx: int) -> InlineKeyboardMarkup:
     return create_inline_keyboard([
@@ -1391,7 +1398,7 @@ async def cb_single_practice(cb: CallbackQuery):
                 except Exception as e:
                     logger.error(f"[PRACTICE_SINGLE] Ошибка отправки описания практики {idx}: {e}")
 
-                # 3. Основное видео
+                # 3. Основное видео с кнопкой назад
                 video_id = None
                 if idx < len(Config.PRACTICE_VIDEO_IDS):
                     video_id = Config.PRACTICE_VIDEO_IDS[idx]
@@ -1399,10 +1406,11 @@ async def cb_single_practice(cb: CallbackQuery):
                     try:
                         logger.info(f"[PRACTICE_SINGLE] Отправляем основное видео_note {video_id}")
                         await cb.message.answer_video_note(video_id)
+                        await cb.message.answer("Практика запущена ↓", reply_markup=kb_back_to_practices())
                     except Exception as e:
                         logger.error(f"[PRACTICE_SINGLE] Ошибка основного видео {idx}: {e}")
 
-                # 4. Бонус-аудио
+                # 4. Бонус-аудио с кнопкой назад
                 bonus_audio = None
                 if idx < len(Config.PRACTICE_BONUS_AUDIO):
                     bonus_audio = Config.PRACTICE_BONUS_AUDIO[idx]
@@ -1413,31 +1421,34 @@ async def cb_single_practice(cb: CallbackQuery):
                             audio=bonus_audio,
                             title=f"{title} — Бонус",
                             performer=Config.PRACTICE_PERFORMERS[idx],
-                            duration=300
+                            duration=300,
+                            reply_markup=kb_back_to_practices()
                         )
                         await asyncio.sleep(1.5)
                     except Exception as e:
                         logger.error(f"[PRACTICE_SINGLE] Ошибка бонус-аудио {idx}: {e}")
 
-                # 5. Основное аудио
+                # 5. Основное аудио с кнопкой назад
                 audio_id = None
                 if idx < len(Config.PRACTICE_AUDIO_IDS):
                     audio_id = Config.PRACTICE_AUDIO_IDS[idx]
                 if audio_id:
                     try:
                         duration_minutes = Config.PRACTICE_DETAILS[idx]["duration"]
-                        logger.info(f"[PRACTICE_SINGLE] Отправляем основное аудио {audio_id} (длительность ~{duration_minutes} мин)")
+                        logger.info(
+                            f"[PRACTICE_SINGLE] Отправляем основное аудио {audio_id} (длительность ~{duration_minutes} мин)")
                         await cb.message.answer_audio(
                             audio=audio_id,
                             title=title,
                             performer=Config.PRACTICE_PERFORMERS[idx],
-                            duration=duration_minutes * 60
+                            duration=duration_minutes * 60,
+                            reply_markup=kb_back_to_practices()
                         )
                     except Exception as e:
                         logger.error(f"[PRACTICE_SINGLE] Ошибка основного аудио {idx}: {e}")
                         await cb.message.answer("Не удалось загрузить основное аудио 😔")
 
-                # Завершение
+                # Завершение (как раньше, но можно добавить кнопку если нужно)
                 try:
                     await cb.message.answer(
                         "Практика завершена! ✨\n\nХочешь повторить или перейти к следующей?",
