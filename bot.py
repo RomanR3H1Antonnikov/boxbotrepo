@@ -350,58 +350,6 @@ class Config:
     PACKAGE_WIDTH_CM = 26
     PACKAGE_HEIGHT_CM = 8
 
-    # Популярные города (для быстрого выбора)
-    # Внутри класса Config:
-    # POPULAR_CITIES = {
-    #     "Москва": "44",
-    #     "Санкт-Петербург": "137",
-    #     "Новосибирск": "157",
-    #     "Екатеринбург": "195",
-    #     "Казань": "138",
-    #     "Нижний Новгород": "152",
-    #     "Челябинск": "163",
-    #     "Красноярск": "153",
-    #     "Самара": "149",
-    #     "Уфа": "154",
-    #     "Ростов-на-Дону": "161",
-    #     "Омск": "158",
-    #     "Краснодар": "151",
-    #     "Воронеж": "148",
-    #     "Пермь": "248",
-    #     "Волгоград": "147",
-    #     "Саратов": "150",
-    #     "Тюмень": "162",
-    #     "Тольятти": "149",  # дубликат, но оставляем
-    #     "Ижевск": "140",
-    #     "Барнаул": "156",
-    #     "Ульяновск": "155",
-    #     "Иркутск": "159",
-    #     "Хабаровск": "160",
-    #     "Ярославль": "164",
-    #     "Махачкала": "165",
-    #     "Владивосток": "166",
-    #     "Оренбург": "167",
-    #     "Томск": "168",
-    #     "Кемерово": "169",
-    #     "Калининград": "145",
-    #     "Вологда": "136",
-    #     "Сургут": "250",
-    #     "Тверь": "172",
-    #     "Брянск": "132",
-    #     "Липецк": "146",
-    #     "Курск": "143",
-    #     "Белгород": "131",
-    #     "Калуга": "142",
-    #     "Смоленск": "170",
-    #     "Пенза": "159",
-    #     "Рязань": "162",
-    #     "Орел": "157",
-    #     "Тула": "173",
-    #     "Якутск": "174",
-    #     "Мурманск": "155",
-    #     "Архангельск": "130",
-    # }
-
 # ========== ADMIN ==========
 ADMIN_USERNAMES = {"@RE_HY"}
 ADMIN_ID = 1049170524
@@ -2880,29 +2828,44 @@ def _normalize_address_variants(address_query: str) -> List[str]:
     return list(variants)
 
 
+def _prepare_street_key(street_part: str) -> str:
+    """Сохраняем дефисы и порядковые окончания для правильного матчинга"""
+    # Не убираем дефисы и окончания типа 2-й, 1-я, 5-е
+    street = street_part.lower().strip()
+    # Только убираем тип улицы в начале/конце, но оставляем суть
+    street = re.sub(r'^(ул\.?|улица|пр\.?|проспект|пр-кт|пр-т|б-р|бульвар|пер\.?|переулок|ш\.?|шоссе)\s+', '', street)
+    street = re.sub(r'\s+(ул\.?|улица|пр\.?|проспект|пр-кт|пр-т|б-р|бульвар|пер\.?|переулок|ш\.?|шоссе)$', '', street)
+    # Убираем лишние пробелы
+    return re.sub(r'\s+', ' ', street).strip()
+
+
 def _make_exact_matcher(address_query: str):
     """
-    Максимально мягкий и умный матчер для российских адресов
+    Улучшенный матчер, который лучше работает с «2-й», дефисами и сложными названиями
     """
     query = (address_query or "").strip().lower()
 
     logger.info(f"Начало работы матчера для запроса: '{query}'")
 
-    # 1. Убираем город в начале, если он отделён запятой
+    # 1. Пытаемся убрать город в начале
+    city_removed = False
     if ',' in query:
         parts = query.split(',', 1)
-        if len(parts) > 1 and any(kw in parts[0] for kw in ["город", "г.", "г ", "г. "]):
+        if len(parts) > 1 and any(kw in parts[0] for kw in ["город", "г.", "г ", "г. ", "область", "край", "республика"]):
             query = parts[1].strip()
-            logger.info(f"Убрали город в начале → новая строка: '{query}'")
+            city_removed = True
+            logger.info(f"Убрали город/регион в начале → '{query}'")
 
-    # 2. Расширенная нормализация сокращений (особенно важно для "пр.", "пр-т", "пр-кт")
+    # 2. Нормализация сокращений (расширенный список)
     replacements = [
         ("пр-т", "проспект"), ("пр-кт", "проспект"), ("пр.", "проспект"), ("пр ", "проспект "),
-        ("ул.", "улица"), ("ул ", "улица "), ("пер.", "переулок"),
-        ("ш.", "шоссе"), ("наб.", "набережная"), ("бул.", "бульвар"),
-        ("пл.", "площадь"), ("кв.", "квартал"),
-        ("д.", "дом"), ("стр.", "строение"), ("корп.", "корпус"), ("к.", "корпус"),
-        ("лит.", "литера"), ("лит", "литера"),
+        ("пр-д", "проезд"), ("пр-зд", "проезд"),
+        ("ул.", "улица"), ("ул ", "улица "),
+        ("пер.", "переулок"),
+        ("ш.", "шоссе"),
+        ("б-р", "бульвар"), ("бул.", "бульвар"),
+        ("наб.", "набережная"),
+        ("пл.", "площадь"),
     ]
 
     for old, new in replacements:
@@ -2910,31 +2873,49 @@ def _make_exact_matcher(address_query: str):
 
     logger.info(f"После замены сокращений: '{query}'")
 
-    # 3. Убираем все типы улиц и лишние слова
-    query_clean = re.sub(
-        r'\b(ул|улица|проспект|пр-т|пр-кт|пр|пер|переулок|ш|шоссе|бул|бульвар|'
-        r'пл|площадь|наб|набережная|тракт|аллея|кв|квартал|д|дом|стр|строение|'
-        r'корп|корпус|лит|литера|к|корп\.?|стр\.?|лит\.?|пом|помещение|оф|офис)\b\.?',
-        '', query, flags=re.IGNORECASE
-    )
+    # 3. Пробуем выделить улицу и дом несколькими способами
+    variants = []
 
-    # Оставляем только буквы, цифры, пробелы и /
-    query_clean = re.sub(r'[^\w\s/]', ' ', query_clean)
-    query_clean = re.sub(r'\s+', ' ', query_clean).strip()
+    # Вариант А: классический — запятая перед домом
+    if ',' in query:
+        parts = [p.strip() for p in query.split(',')]
+        if len(parts) >= 2:
+            street = ' '.join(parts[:-1])
+            house_raw = parts[-1]
+            variants.append((street, house_raw))
 
-    logger.info(f"Очищенная строка для поиска: '{query_clean}'")
+    # Вариант Б: без запятой — ищем дом в конце
+    house_match = re.search(r'(\d+[а-яА-ЯёЁ0-9/кстркорп.-]*\s*[а-яА-ЯёЁ]?)', query)
+    if house_match:
+        house_raw = house_match.group(1).strip()
+        street = query[:house_match.start()].strip()
+        if street and house_raw:
+            variants.append((street, house_raw))
 
-    # 4. Выделяем улицу и дом
-    house_match = re.search(r'(\d+[а-яА-ЯёЁ0-9/\\а-яА-ЯёЁ\s.-]*\d*)', query_clean)
-    house_raw = house_match.group(1).strip() if house_match else None
+    # Вариант В: просто берём всё как улицу + дом (если ничего выше не нашлось)
+    if not variants and ' ' in query:
+        parts = query.rsplit(' ', 1)
+        street = parts[0]
+        house_raw = parts[1]
+        variants.append((street, house_raw))
 
-    street = re.sub(r'\d.*$', '', query_clean).strip()
+    # Если всё ещё ничего — весь запрос как улица, дома нет
+    if not variants:
+        variants.append((query, None))
 
-    # Берём максимально осмысленный кусок улицы (до 3 слов, но не больше 12 символов)
-    street_words = street.split()
-    street_key = ' '.join(street_words[:3])[:12]
+    logger.info(f"Варианты разбиения: {variants}")
 
-    logger.info(f"Выделено для поиска → street_key='{street_key}', house_raw='{house_raw}'")
+    # Выбираем самый вероятный вариант (с домом предпочтительнее)
+    street, house_raw = None, None
+    for s, h in variants:
+        if h and re.search(r'\d', h):  # в доме должна быть хотя бы одна цифра
+            street, house_raw = s, h
+            break
+    if not street:
+        street, house_raw = variants[0]
+
+    street_key = _prepare_street_key(street)
+    logger.info(f"Итоговый street_key = '{street_key}', house_raw = '{house_raw}'")
 
     def matcher(pvz: dict) -> bool:
         addr_full = (pvz.get("location", {}).get("address_full") or
@@ -2943,39 +2924,36 @@ def _make_exact_matcher(address_query: str):
         if not addr_full:
             return False
 
-        # Очень мягкая проверка улицы
+        # Очень лояльная проверка улицы
         street_ok = False
-        if street_key and len(street_key) >= 3:
+        if street_key:
+            # Пробуем разные уровни строгости
             if street_key in addr_full:
                 street_ok = True
-            elif street_key[:7] in addr_full:
+            elif len(street_key) > 8 and street_key[:8] in addr_full:
                 street_ok = True
-            elif any(word in addr_full for word in street_key.split() if len(word) >= 4):
-                street_ok = True
-        else:
-            # Если улицы почти нет — хотя бы начало запроса
-            if len(query_clean) >= 4 and query_clean[:4] in addr_full:
+            elif any(word in addr_full for word in street_key.split() if len(word) >= 5):
                 street_ok = True
 
-        # Проверка дома — максимально гибко
+        # Проверка дома
         house_ok = False
         if house_raw:
+            # Цифры дома
             house_digits = re.sub(r'[^\d]', '', house_raw)
             if house_digits:
                 addr_digits = re.sub(r'[^\d]', '', addr_full)
-                for ln in range(min(len(house_digits), 5), 1, -1):
-                    if house_digits[:ln] in addr_digits:
-                        house_ok = True
-                        break
-
-            # Проверка с дробью/корпусом/строением
-            if not house_ok and ('/' in house_raw or 'к' in house_raw or 'стр' in house_raw or 'корп' in house_raw):
-                if any(h in addr_full for h in house_raw.split()):
+                if house_digits in addr_digits:
                     house_ok = True
 
-        # Логируем результат сравнения для каждого ПВЗ (только в debug режиме можно включить)
-        # if street_ok and house_ok:
-        #     logger.debug(f"Совпадение! {pvz.get('code')} → {addr_full}")
+            # Проверка с корпусами, строениями, литерами и т.д.
+            if not house_ok:
+                # Пытаемся найти хотя бы часть house_raw
+                house_parts = re.split(r'[\s,]+', house_raw)
+                house_ok = any(part in addr_full for part in house_parts if len(part) >= 2)
+
+        # Если улицы почти нет — полагаемся только на дом
+        if len(street_key) < 4 and house_ok:
+            return True
 
         return street_ok and (house_ok or not house_raw)
 
@@ -3057,15 +3035,6 @@ async def find_best_pvz(address_query: str, city: str = None, limit: int = 12) -
             f"Используем Москву (44) как fallback"
         )
 
-    # Можно добавить уведомление пользователю (опционально)
-    # if city_code == 44 and city_name_candidate:
-    #     await message.answer(
-    #         f"Не удалось точно определить город «{city_name_candidate}».\n"
-    #         "Для поиска ПВЗ используется Москва.\n\n"
-    #         "Попробуйте указать город явно в начале, например:\n"
-    #         "Казань, Баумана 15\nЕкатеринбург, Ленина 50",
-    #         reply_markup=create_inline_keyboard([[{"text": "Ввести заново", "callback_data": "pvz_reenter"}]])
-    #     )
 
     logger.info(f"Итоговый city_code для поиска ПВЗ: {city_code}")
 
@@ -3086,16 +3055,17 @@ async def find_best_pvz(address_query: str, city: str = None, limit: int = 12) -
     matcher = _make_exact_matcher(original_query)
     filtered = [p for p in pts if matcher(p)]
 
-    # Если ничего не нашли по матчингу — показываем все ПВЗ города
+    # ───────────────────────────────────────────────
+    # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ — поведение при неудаче
+    # ───────────────────────────────────────────────
     if not filtered:
-        logger.info("Фильтр по адресу ничего не нашёл → возвращаем все ПВЗ города")
-        filtered = pts
+        logger.info("Ни один точный ПВЗ не найден даже после всех попыток")
+        return []  # ← Возвращаем ПУСТОЙ список!
 
-    # Сортировка по расстоянию, если есть
+    # Если что-то нашли — продолжаем как раньше
     if any("distance" in p for p in filtered):
         filtered.sort(key=lambda p: p.get("distance") or 999999)
 
-    # Ограничиваем количество
     result = filtered[:limit]
 
     # Очень подробный лог того, что именно мы отдаём пользователю
