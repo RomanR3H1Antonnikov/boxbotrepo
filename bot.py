@@ -2736,7 +2736,10 @@ def _shorten_address(address: str) -> str:
     parts = [p.strip() for p in address.split(',')]
     logger.info(f"shorten_address: после split по запятой = {parts}")
 
-    if len(parts) >= 2:
+    if len(parts) >= 3:
+        # Берём последние две части (улица + дом)
+        street_house = ', '.join(parts[-2:])
+    elif len(parts) >= 2:
         street_house = parts[-1]
     else:
         street_house = address
