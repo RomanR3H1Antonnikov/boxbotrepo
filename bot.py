@@ -554,6 +554,8 @@ def reset_states(user):
     user.awaiting_pvz_address = False
     user.awaiting_manual_pvz = False
     user.awaiting_manual_track = False
+    if user.awaiting_redeem_code:
+        logger.info(f"Сброс флага awaiting_redeem_code у пользователя {user.telegram_id}")
     user.awaiting_redeem_code = False
     user.pvz_for_order_id = None
     user.temp_gift_order_id = None
@@ -1328,6 +1330,8 @@ async def cb_redeem_start(cb: CallbackQuery):
         await cb.message.answer("Сначала авторизуйтесь.", reply_markup=kb_cabinet_unauth())
         await cb.answer(); return
     user.awaiting_redeem_code = True
+    logger.info(f"Пользователь {user.telegram_id} начал ввод кода → awaiting_redeem_code = True")
+    sess.commit()
     await cb.message.answer("Введите <b>код с карточки</b>:",
                             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.CABINET.value}]]))
     sess.commit()
@@ -2292,6 +2296,48 @@ async def on_message_router(message: Message):
         sess.refresh(user)
         text = (message.text or "").strip()
 
+        # ───────────────────────────────────────────────
+        # САМЫЙ ВЕРХ — проверка активации кода (самый высокий приоритет!)
+        # ───────────────────────────────────────────────
+        if user.awaiting_redeem_code:
+            if not CODE_RE.match(text):
+                await message.answer("Код должен состоять из 4 цифр. Попробуйте ещё раз.")
+                return
+
+            code = text.strip()
+
+            if code not in Config.CODES_POOL:
+                await message.answer("❌ Код не найден или уже использован.")
+                user.awaiting_redeem_code = False
+                logger.info(
+                    f"Пользователь {user.telegram_id} завершил/отменил ввод кода → awaiting_redeem_code = False")
+                sess.commit()
+                await message.answer("Вернитесь в кабинет:", reply_markup=kb_cabinet())
+                return
+
+            # Успешная активация
+            Config.CODES_POOL.remove(code)
+            user.awaiting_redeem_code = False
+            logger.info(f"Пользователь {user.telegram_id} завершил/отменил ввод кода → awaiting_redeem_code = False")
+
+            if not user.practices:
+                user.practices = []
+
+            for practice in Config.DEFAULT_PRACTICES:
+                if practice not in user.practices:
+                    user.practices.append(practice)
+
+            user.awaiting_redeem_code = False
+            sess.commit()
+
+            await message.answer(
+                "🎉 Код активирован!\n\n"
+                "Теперь у тебя есть доступ ко всем 7 практикам навсегда ❤️\n"
+                "Перейди в раздел «Мои практики»",
+                reply_markup=kb_practices_list(user.practices)
+            )
+            return
+
         # ===== 1. ПОДАРОЧНОЕ ПОСЛАНИЕ =====
         if user.awaiting_gift_message:
             orders = get_user_orders_db(sess, message.from_user.id)
@@ -2451,9 +2497,7 @@ async def on_message_router(message: Message):
             if not pvz_list:
                 await message.answer(
                     f"Не удалось точно найти ПВЗ по запросу «{text}» 😔\n\n"
-                    "Показываю **все** пункты выдачи в этом городе.\n"
-                    "Если среди них есть нужный - выбирайте.\n\n"
-                    "Если всё равно не то - попробуйте ввести адрес чуть иначе "
+                    "Попробуйте ввести адрес чуть иначе "
                     "(например, без города, или только улицу + номер дома), или введите код пункта выдачи.\n\n"
                     "Или напишите в поддержку @anbolshakowa — подберём вручную.",
                     reply_markup=create_inline_keyboard([
@@ -2506,43 +2550,6 @@ async def on_message_router(message: Message):
                 reply_markup=kb_main()
             )
             return
-
-    # ===== АКТИВАЦИЯ КОДА =====
-    if user.awaiting_redeem_code:
-        if not CODE_RE.match(text):
-            await message.answer("Код должен состоять из 4 цифр. Попробуйте ещё раз.")
-            return
-
-        code = text.strip()
-
-        if code not in Config.CODES_POOL:
-            await message.answer("❌ Код не найден или уже использован.")
-            user.awaiting_redeem_code = False
-            sess.commit()
-            await message.answer("Вернитесь в кабинет:", reply_markup=kb_cabinet())
-            return
-
-        # Успешная активация
-        Config.CODES_POOL.remove(code)  # удаляем из пула
-
-        if not user.practices:
-            user.practices = []
-
-        # Добавляем все практики, если их ещё нет
-        for practice in Config.DEFAULT_PRACTICES:
-            if practice not in user.practices:
-                user.practices.append(practice)
-
-        user.awaiting_redeem_code = False
-        sess.commit()
-
-        await message.answer(
-            "🎉 Код активирован!\n\n"
-            "Теперь у тебя есть доступ ко всем 7 практикам навсегда ❤️\n"
-            "Перейди в раздел «Мои практики»",
-            reply_markup=kb_practices_list(user.practices)
-        )
-        return
 
     # ===== 4. ОБЫЧНЫЙ ТЕКСТ / ФОЛЛБЕК =====
     await on_text(message)
