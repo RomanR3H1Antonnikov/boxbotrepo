@@ -1325,25 +1325,36 @@ async def cb_open_practice(cb: CallbackQuery):
 @r.callback_query(F.data == CallbackData.REDEEM_START.value)
 async def cb_redeem_start(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
+
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
-    if not user.is_authorized:
-        await cb.message.answer("Сначала авторизуйтесь.", reply_markup=kb_cabinet_unauth())
-        await cb.answer(); return
-    user.awaiting_redeem_code = True
-    logger.info(f"Пользователь {user.telegram_id} начал ввод кода → awaiting_redeem_code = True")
-    sess.commit()
-    await asyncio.sleep(0.4)
-    await cb.message.answer(
-        "Введите <b>код с карточки</b>:",
-        reply_markup=create_inline_keyboard([
-            [{"text": "Отменить", "callback_data": "redeem:cancel"}],
-            [{"text": "Назад в кабинет", "callback_data": CallbackData.CABINET.value}]
-        ])
-    )
+
+        if not user.is_authorized:
+            await cb.message.answer("Сначала авторизуйтесь.", reply_markup=kb_cabinet_unauth())
+            await cb.answer()
+            return
+
+        # Самое важное — меняем и коммитим ВНУТРИ with-блока
+        user.awaiting_redeem_code = True
+        logger.info(f"Пользователь {user.telegram_id} начал ввод кода → awaiting_redeem_code = True")
+
+        sess.commit()  # ← сохраняем немедленно
+
+        # Дополнительная защита — ждём чуть-чуть, чтобы диск точно успел
+        await asyncio.sleep(0.3)  # ← 300 мс обычно хватает даже на Pi
+
+        # Только после успешного сохранения отправляем сообщение
+        await cb.message.answer(
+            "Введите <b>код с карточки</b> (4 цифры):",
+            reply_markup=create_inline_keyboard([
+                [{"text": "Отменить", "callback_data": "redeem:cancel"}],
+                [{"text": "Назад в кабинет", "callback_data": CallbackData.CABINET.value}]
+            ])
+        )
+
     await cb.answer()
 
 
@@ -2320,8 +2331,8 @@ async def on_message_router(message: Message):
         # ───────────────────────────────────────────────
         # САМЫЙ ВЕРХ — проверка активации кода (самый высокий приоритет!)
         # ───────────────────────────────────────────────
-        logger.info(
-            f"Получено сообщение '{text}' от {user.telegram_id}, awaiting_redeem_code = {user.awaiting_redeem_code}")
+        logger.info(f"→ Проверка состояния перед обработкой: awaiting_redeem_code = {user.awaiting_redeem_code}")
+        logger.info(f"Получено сообщение '{text}' от {user.telegram_id}, awaiting_redeem_code = {user.awaiting_redeem_code}")
         if user.awaiting_redeem_code:
             if not CODE_RE.match(text):
                 await message.answer("Код должен состоять из 4 цифр. Попробуйте ещё раз.")
