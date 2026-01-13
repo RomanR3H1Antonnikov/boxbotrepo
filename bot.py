@@ -1268,8 +1268,43 @@ async def cb_team(cb: CallbackQuery):
     await cb.answer()
 
 # ========== PRACTICES ==========
+@r.callback_query(F.data == CallbackData.PRACTICES.value)
+async def cb_practices_list(cb: CallbackQuery):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await cb.answer("Ошибка доступа", show_alert=True)
+            return
+
+        if not user.is_authorized:
+            await edit_or_send(
+                cb.message,
+                "Чтобы увидеть практики — авторизуйтесь в личном кабинете.",
+                kb_cabinet_unauth()
+            )
+            await cb.answer()
+            return
+
+        if not user.practices:
+            await edit_or_send(
+                cb.message,
+                "У вас пока нет практик.\nАктивируйте код или закажите коробочку!",
+                kb_empty_practices()
+            )
+            await cb.answer()
+            return
+
+        await edit_or_send(
+            cb.message,
+            "Твои практики:",
+            kb_practices_list(user.practices)
+        )
+    await cb.answer()
+
+
 @r.callback_query(F.data.startswith("practice:"))
-async def cb_practices(cb: CallbackQuery):
+async def cb_single_practice(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
@@ -1294,6 +1329,10 @@ async def cb_practices(cb: CallbackQuery):
     title = user.practices[idx]
 
     if action == "play":
+        if user.temp_playing_practice == idx:
+            await cb.answer("Практика уже запущена!", show_alert=True)
+            return
+        user.temp_playing_practice = idx
         # ← Здесь начинается практика после нажатия "Начать"
 
         # 1. Вступительное видео/кружочек (если есть)
@@ -1506,8 +1545,6 @@ async def cb_simple_navigation(cb: CallbackQuery):
             await cb_faq(cb)
         elif data == "team":
             await cb_team(cb)
-        elif data == "practices":
-            await cb_practices(cb)
         elif data == "orders":
             await cb_orders_list(cb)
     except Exception as e:
@@ -2026,7 +2063,7 @@ async def cb_pvz_select(cb: CallbackQuery):
             return
 
         if not user.temp_pvz_list or not (0 <= idx < len(user.temp_pvz_list)):
-            await cb.answer("Список ПВЗ устарел — введите адрес заново", show_alert=True)
+            await cb.answer("Список ПВЗ устарел - введите адрес заново", show_alert=True)
             return
 
         pvz = user.temp_pvz_list[idx]
