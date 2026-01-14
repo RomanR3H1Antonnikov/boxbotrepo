@@ -92,6 +92,8 @@ logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 
 logger.info(f"CDEK_ACCOUNT загружен: {'Да' if CDEK_ACCOUNT else 'НЕТ'}")
 logger.info(f"CDEK_SECURE_PASSWORD загружен: {'Да' if CDEK_SECURE_PASSWORD else 'НЕТ'}")
+logger.info(f"CDEK_PROD_ACCOUNT загружен: {'Да' if os.getenv('CDEK_PROD_ACCOUNT') else 'НЕТ'}")
+logger.info(f"CDEK_PROD_PASSWORD загружен: {'Да' if os.getenv('CDEK_PROD_PASSWORD') else 'НЕТ'}")
 
 # ========== CDEK: Получение токена ==========
 async def get_cdek_token() -> Optional[str]:
