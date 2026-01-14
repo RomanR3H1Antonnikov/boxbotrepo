@@ -364,6 +364,10 @@ class Config:
     PACKAGE_WIDTH_CM = 26
     PACKAGE_HEIGHT_CM = 8
 
+    # CHANEL
+    # CLOSED_CHANNEL_LINK = "https://t.me/+n85Qa4GPd1s5Yzgy"  # ← вставь реальную ссылку
+    # CLOSED_CHANNEL_ID = -1001234567890  # ← обязательно! ID канала (отрицательное число)
+
 # ========== ADMIN ==========
 ADMIN_USERNAMES = {"@RE_HY"}
 ADMIN_ID = 1049170524
