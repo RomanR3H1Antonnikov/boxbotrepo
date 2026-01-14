@@ -90,10 +90,10 @@ logging.basicConfig(
 logger = logging.getLogger("box_bot")
 logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 
-logger.info(f"CDEK_ACCOUNT загружен: {'Да' if CDEK_ACCOUNT else 'НЕТ'}")
-logger.info(f"CDEK_SECURE_PASSWORD загружен: {'Да' if CDEK_SECURE_PASSWORD else 'НЕТ'}")
-logger.info(f"CDEK_PROD_ACCOUNT загружен: {'Да' if os.getenv('CDEK_PROD_ACCOUNT') else 'НЕТ'}")
-logger.info(f"CDEK_PROD_PASSWORD загружен: {'Да' if os.getenv('CDEK_PROD_PASSWORD') else 'НЕТ'}")
+prod_account = os.getenv("CDEK_PROD_ACCOUNT") or ""
+prod_password = os.getenv("CDEK_PROD_PASSWORD") or ""
+logger.info(f"CDEK_PROD_ACCOUNT загружен: {'Да (непустой)' if prod_account.strip() else 'НЕТ или пустой'} | Длина: {len(prod_account)}")
+logger.info(f"CDEK_PROD_PASSWORD загружен: {'Да (непустой)' if prod_password.strip() else 'НЕТ или пустой'} | Длина: {len(prod_password)}")
 
 # ========== CDEK: Получение токена ==========
 async def get_cdek_token() -> Optional[str]:
@@ -130,9 +130,10 @@ async def get_cdek_token() -> Optional[str]:
 
 
 async def get_cdek_prod_token() -> Optional[str]:
-    account = os.getenv("CDEK_PROD_ACCOUNT")
-    password = os.getenv("CDEK_PROD_PASSWORD")
-    if not account or not password:
+    account = os.getenv("CDEK_PROD_ACCOUNT") or ""
+    password = os.getenv("CDEK_PROD_PASSWORD") or ""
+    if not account.strip() or not password.strip():  # .strip() для игнора пробелов
+        logger.error("CDEK_PROD ключи пустые или отсутствуют!")
         return None
     url = "https://api.cdek.ru/v2/oauth/token"  # прод!
     data = {"grant_type": "client_credentials", "client_id": account, "client_secret": password}
@@ -140,7 +141,10 @@ async def get_cdek_prod_token() -> Optional[str]:
         response = await asyncio.to_thread(requests.post, url, data=data, timeout=15)
         if response.status_code == 200:
             return response.json().get("access_token")
-    except:
+    except Exception as e:
+        logger.error(f"Ошибка получения прод-токена: {e}")
+        if 'response' in locals():
+            logger.error(f"Ответ: {response.status_code} {response.text}")
         return None
 
 
