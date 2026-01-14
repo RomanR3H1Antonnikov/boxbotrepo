@@ -2882,7 +2882,7 @@ async def handle_admin_command(message: Message, text: str):
 
 # ========== НОВЫЕ ФУНКЦИИ СДЭК ==========
 async def get_cdek_city_code(city_name: str) -> Optional[int]:
-    token = await get_cdek_token()
+    token = await get_cdek_prod_token()
     if not token:
         return None
 
@@ -2914,10 +2914,8 @@ async def get_cdek_pvz_list(address_query: str, city_code: Optional[int] = None,
     # token = await get_cdek_token()
     token = await get_cdek_prod_token()
     if not token:
-        token = await get_cdek_token()  # fallback на тест
-        if not token:
-            logger.error("Нет токена для поиска ПВЗ")
-            return []
+        logger.error("Нет прод токена для поиска ПВЗ - проверьте .env")
+        return []
 
     url = "https://api.cdek.ru/v2/deliverypoints"
     params = {
