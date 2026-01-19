@@ -2995,45 +2995,34 @@ async def get_cdek_pvz_list(address_query: str, city_code: Optional[int] = None,
 
 def _shorten_address(address: str) -> str:
     if not address:
-        logger.info("shorten_address: вход пустой → возврат 'ПВЗ СДЭК'")
         return "ПВЗ СДЭК"
 
-    logger.info(f"shorten_address: исходный адрес = {address!r}")
-
-    # Берём часть после последней запятой — обычно это улица + дом
+    # Разбиваем по запятой
     parts = [p.strip() for p in address.split(',')]
-    logger.info(f"shorten_address: после split по запятой = {parts}")
 
+    # Берём последние 1–2 значимых части
     if len(parts) >= 3:
-        # Берём последние две части (улица + дом)
+        # Улица + дом
         street_house = ', '.join(parts[-2:])
-    elif len(parts) >= 2:
-        street_house = parts[-1]
     else:
         street_house = address
 
-    logger.info(f"shorten_address: выбрана часть = {street_house!r}")
+    # Убираем всё после номера дома (корп, стр, к, литеру и т.п.)
+    # Оставляем только улицу и основной номер дома
+    street_house = re.sub(r'\s*[ккстркорп./лит]+.*$', '', street_house).strip()
 
-    # Убираем очевидный мусор
+    # Убираем очевидный мусор в начале/конце
     street_house = re.sub(r'^(Россия|Москва|г\.|обл\.|край|Республика)\s*[,;]?\s*', '', street_house, flags=re.I)
     street_house = re.sub(r'\s*(Россия|Москва|г\.|обл\.|край|Республика)$', '', street_house, flags=re.I)
-
-    logger.info(f"shorten_address: после удаления префиксов/суффиксов = {street_house!r}")
 
     # Нормализация пробелов
     street_house = re.sub(r'\s+', ' ', street_house).strip()
 
-    logger.info(f"shorten_address: после нормализации пробелов = {street_house!r}")
+    # Если слишком длинно — обрезаем красиво
+    if len(street_house) > 42:
+        street_house = street_house[:39] + "…"
 
-    # Обрезка, если слишком длинно
-    if len(street_house) > 38:
-        old = street_house
-        street_house = street_house[:35] + "..."
-        logger.info(f"shorten_address: обрезали с {len(old)} до {len(street_house)} символов: {street_house!r}")
-
-    result = street_house or "ПВЗ СДЭК"
-    logger.info(f"shorten_address: финальный результат = {result!r}")
-    return result
+    return street_house or "ПВЗ СДЭК"
 
 
 def _extract_street_house(addr: str) -> tuple[Optional[str], Optional[str]]:
@@ -3386,32 +3375,17 @@ def format_pvz_button(pvz: dict, index: int) -> dict:
     loc = pvz.get("location", {}) or {}
     address = loc.get("address_full") or loc.get("address") or ""
 
-    logger.info(f"format_button #{index + 1}: code={code}, полный адрес={address!r}")
-
     short_addr = _shorten_address(address) or f"ПВЗ {code}"
 
-    logger.info(f"format_button #{index + 1}: после shorten = {short_addr!r}")
-
+    # Можно оставить расстояние, если оно есть и небольшое
     dist = pvz.get("distance")
-    dist_text = f" · {int(dist)}м" if isinstance(dist, (int, float)) and 0 < dist < 10000 else ""
+    dist_text = f" · {int(dist)}м" if isinstance(dist, (int, float)) and 100 < dist < 5000 else ""
 
-    wt = (pvz.get("work_time") or "").strip()
-    time_text = ""
-    if wt:
-        if "круглосуточно" in wt.lower():
-            time_text = " · 24/7"
-        else:
-            first_line = wt.split(";", 1)[0].strip()
-            time_text = f" · {first_line[:12]}"
+    text = f"{index + 1}. {short_addr}{dist_text}"
 
-    text = f"{index + 1}. {short_addr}{dist_text}{time_text}"
-
-    logger.info(f"format_button #{index + 1}: итоговый текст кнопки = {text!r} (длина={len(text)})")
-
+    # Обрезаем только если всё равно длиннее лимита Telegram
     if len(text) > 64:
-        old_text = text
-        text = text[:61] + "..."
-        logger.info(f"format_button #{index + 1}: текст обрезан с {len(old_text)} до {len(text)}: {text!r}")
+        text = text[:61] + "…"
 
     return {
         "text": text,
