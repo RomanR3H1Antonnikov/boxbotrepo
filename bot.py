@@ -286,7 +286,7 @@ class Config:
         "alexey": {"name": "Алексей Большаков", "video_note_id": os.getenv("EXPERT_ALEXEY_NOTE_ID")},
         "alexander": {"name": "Александр Верховский", "video_note_id": os.getenv("EXPERT_ALEXANDER_NOTE_ID")},
     }
-    PRICE_RUB = 2990
+    PRICE_RUB = 5990
     PREPAY_PERCENT = 30
     ADMIN_HELP_NICK = "@anbolshakowa"
     CODES_POOL = {
@@ -309,13 +309,13 @@ class Config:
         "Александр Верховский",  # 6
     ]
     PRACTICE_DETAILS = [
-        {"duration": 40, "desc": "Единственное в своем теле, что ты можешь контролировать - это дыхание..."},
-        {"duration": 15, "desc": "Когда ты есть у себя, когда ты чувствуешь опору в себе..."},
-        {"duration": 15, "desc": "Теория тревожного состояния простым языком..."},
-        {"duration": 16, "desc": "Когда восстанавливается связь с внутренним ребенком..."},
-        {"duration": 15, "desc": "Перестать убегать от неопределенности жизни..."},
-        {"duration": 15, "desc": "Энергию, расходовавшуюся на тревогу, направляем..."},
-        {"duration": 16, "desc": "Отправляясь в царство Морфея в спокойнейшем состоянии..."},
+        {"duration": 34, "desc": "Единственное в своем теле, что ты можешь контролировать - это дыхание. Ты даешь своему телу сигнал «я здесь главная, расслабься, ты в моих любящих и заботливых руках, все хорошо»"},
+        {"duration": 15, "desc": "Когда ты есть у себя, когда ты чувствуешь опору в себе - любая задача решается с интересом и последующим ростом."},
+        {"duration": 6, "desc": "Теория тревожного состояния простым языком расслабит ум, даст ясность и уверенность."},
+        {"duration": 16, "desc": "Когда восстанавливается связь с внутренним ребенком - игра возвращается в жизнь. Это очень приятно."},
+        {"duration": 17, "desc": "Перестать убегать от неопределенности жизни в тревогу, сделав её своей супер силой."},
+        {"duration": 13, "desc": "Энергию, расходовавшуюся на тревогу, направляем на улучшение своей жизни."},
+        {"duration": 16, "desc": "Отправляясь в царство Морфея в спокойнейшим состоянии, пробуждение утром будет радостным и полным энергии."},
     ]
     PRACTICE_AUDIO_IDS = [
         os.getenv("AUDIO1_ID"),
@@ -364,9 +364,9 @@ class Config:
     CDEK_SHIPMENT_POINT_CODE = "MSK2296"
 
     # Вес и габариты коробки (можно вынести в .env)
-    PACKAGE_WEIGHT_G = 370  # грамм
-    PACKAGE_LENGTH_CM = 19
-    PACKAGE_WIDTH_CM = 26
+    PACKAGE_WEIGHT_G = 750  # грамм
+    PACKAGE_LENGTH_CM = 26
+    PACKAGE_WIDTH_CM = 19
     PACKAGE_HEIGHT_CM = 8
 
     # CHANEL
@@ -908,7 +908,7 @@ def kb_order_status(order: Order) -> InlineKeyboardMarkup:
     if order.status == OrderStatus.READY.value:
         buttons.append([{"text": "Оплатить остаток", "callback_data": f"pay:rem:{order.id}"}])
 
-    buttons.append([{"text": "Обновить статус", "callback_data": f"order:{order.id}"}])
+    buttons.append([{"text": "Информация о заказе", "callback_data": f"order:{order.id}"}])
     buttons.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
 
     return create_inline_keyboard(buttons)
@@ -1594,7 +1594,7 @@ async def cb_change_contact(cb: CallbackQuery):
         sess.add(user)
         sess.commit()
         await cb.message.answer(
-            "Введите адрес или код ПВЗ(например: «Москва, Барклая, 7/1» или «MSK126»):",
+            "Введите адрес или код ПВЗ в формате «Москва, ул. Барклая, 15» или «MSK126»:",
             reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
         )
     sess.commit()
@@ -1650,7 +1650,7 @@ async def cb_shipping_cdek(cb: CallbackQuery):
         sess.commit()
 
     await cb.message.answer(
-        "Введите адрес ПВЗ (например: «Профсоюзная, 93»):",
+        "Введите адрес или код ПВЗ в формате «Москва, ул. Профсоюзная,83» или «MSK89»:",
         reply_markup=create_inline_keyboard([[{"text": "Назад", "callback_data": CallbackData.GALLERY.value}]])
     )
     await cb.answer()
@@ -2375,7 +2375,7 @@ async def cb_gift_cancel(cb: CallbackQuery):
 async def cb_pvz_manual(cb: CallbackQuery):
     await cb.message.edit_text(
         "Вероятно, у вас возникли проблемы с адресом ПВЗ СДЭК.\n\n"
-        "Обратитесь к @anbolshakowa - она поможет подобрать подходящий пункт выдачи и сделать заказ.",
+        "Обратитесь к @anbolshakowa или @dmitrieva_live - они помогут подобрать подходящий пункт выдачи и сделать заказ.",
         reply_markup=create_inline_keyboard([
             [{"text": "В меню", "callback_data": CallbackData.MENU.value}]
         ])
