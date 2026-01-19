@@ -3,7 +3,6 @@ import re
 import asyncio
 import logging
 import requests
-from functools import lru_cache
 from pathlib import Path
 from collections import defaultdict
 from typing import Optional, Dict, List
@@ -371,8 +370,8 @@ class Config:
     PACKAGE_HEIGHT_CM = 8
 
     # CHANEL
-    # CLOSED_CHANNEL_LINK = "https://t.me/+n85Qa4GPd1s5Yzgy"  # ← вставь реальную ссылку
-    # CLOSED_CHANNEL_ID = -1001234567890  # ← обязательно! ID канала (отрицательное число)
+    CLOSED_CHANNEL_LINK = "https://t.me/+n85Qa4GPd1s5Yzgy"
+    CLOSED_CHANNEL_ID = -1003556936442
 
 # ========== ADMIN ==========
 ADMIN_USERNAMES = {"@RE_HY"}
@@ -2518,8 +2517,9 @@ async def on_message_router(message: Message):
             # Успешная активация
             Config.CODES_POOL.remove(code)
             user.awaiting_redeem_code = False
-            logger.info(f"Пользователь {user.telegram_id} завершил ввод кода → awaiting_redeem_code = False")
+            logger.info(f"Пользователь {user.telegram_id} успешно активировал код {code}")
 
+            # Добавляем практики, если их ещё нет
             added_count = 0
             if not user.practices:
                 user.practices = []
@@ -2529,23 +2529,69 @@ async def on_message_router(message: Message):
                     user.practices.append(practice)
                     added_count += 1
 
+            # Обновляем/создаём запись в таблице access
+            from db.models import Access
+
+            access = sess.query(Access).filter(Access.user_id == user.telegram_id).first()
+            if not access:
+                access = Access(user_id=user.telegram_id)
+                sess.add(access)
+
+            was_already_open = added_count == 0
+
+            access.practices_access = True
+            access.channel_access = True
+
             sess.commit()
 
-            if added_count > 0:
-                await message.answer(
-                    f"🎉 Код активирован!\n\n"
-                    f"Добавлено новых практик: {added_count}\n"
-                    "Теперь у тебя есть доступ ко всем практикам навсегда ❤️\n"
-                    "Перейди в раздел «Мои практики»",
-                    reply_markup=kb_practices_list(user.practices)
+            # Добавляем в закрытый канал
+            try:
+                await bot.unban_chat_member(
+                    chat_id=Config.CLOSED_CHANNEL_ID,
+                    user_id=user.telegram_id,
+                    only_if_banned=True
+                )
+                logger.info(f"Пользователь {user.telegram_id} добавлен в канал {Config.CLOSED_CHANNEL_ID}")
+            except Exception as e:
+                logger.error(f"Ошибка добавления в канал {user.telegram_id}: {e}")
+                await notify_admin(
+                    f"⚠️ Не удалось добавить {user.telegram_id} (@{user.username or 'нет username'}) "
+                    f"в канал после активации кода.\nОшибка: {e}"
+                )
+
+            # Формируем сообщение в зависимости от того, были ли практики уже открыты
+            if was_already_open:
+                text = (
+                    "Этот код уже был активирован ранее (или все практики уже открыты).\n\n"
+                    "У тебя уже есть доступ ко всем 7 практикам! ✨\n\n"
+                    "Практики ты всегда сможешь найти в разделе «Мои практики» в личном кабинете.\n\n"
+                    "Увидимся в нашем закрытом канале с поддержкой, живыми эфирами "
+                    "и тёплой атмосферой заботы:\n"
+                    f"👉 {Config.CLOSED_CHANNEL_LINK}"
                 )
             else:
-                await message.answer(
-                    "Этот код уже был активирован ранее (или все практики уже открыты).\n"
-                    "У тебя уже есть доступ ко всем 7 практикам! ✨\n"
-                    "Перейди в «Мои практики»",
-                    reply_markup=kb_practices_list(user.practices)
+                text = (
+                    "🎉 Код успешно активирован!\n\n"
+                    f"Добавлено новых практик: {added_count}\n\n"
+                    "Теперь у тебя есть полный доступ ко всем практикам навсегда ❤️\n\n"
+                    "Практики ты всегда сможешь найти в разделе «Мои практики» в личном кабинете.\n\n"
+                    "А ещё приглашаю тебя в наш закрытый канал с поддержкой, живыми эфирами "
+                    "и тёплой атмосферой заботы:\n"
+                    f"👉 {Config.CLOSED_CHANNEL_LINK}"
                 )
+
+            # Клавиатура после активации
+            kb = create_inline_keyboard([
+                [{"text": "Личный кабинет", "callback_data": CallbackData.CABINET.value}],
+                [{"text": "В меню", "callback_data": CallbackData.MENU.value}]
+            ])
+
+            await message.answer(
+                text,
+                reply_markup=kb,
+                disable_web_page_preview=True
+            )
+
             return
 
         # ===== 1. ПОДАРОЧНОЕ ПОСЛАНИЕ =====
@@ -3492,6 +3538,16 @@ async def check_all_shipped_orders():
         await asyncio.sleep(300)  # 5 минут - оптимально
 
 
+async def check_channel_permissions():
+    try:
+        member = await bot.get_chat_member(Config.CLOSED_CHANNEL_ID, bot.id)
+        if member.status not in ("administrator", "creator"):
+            logger.error("Бот НЕ является администратором канала! Добавление пользователей не сработает.")
+            await notify_admin("⚠️ Критично: бот не админ в закрытом канале!")
+    except Exception as e:
+        logger.error(f"Не удалось проверить права бота в канале: {e}")
+
+
 # ========== ENTRYPOINT ==========
 async def main():
     logger.info("Бот запущен - режим polling с автоматическим переподключением")
@@ -3514,6 +3570,7 @@ async def main():
 
     await asyncio.sleep(15)
     asyncio.create_task(check_all_shipped_orders())
+    await check_channel_permissions()
 
     while True:
         try:
