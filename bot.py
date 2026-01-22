@@ -921,11 +921,11 @@ def kb_orders_list(order_ids: List[int]) -> InlineKeyboardMarkup:
     rows.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
     return create_inline_keyboard(rows)
 
-def kb_change_contact() -> InlineKeyboardMarkup:
+def kb_change_contact(back_to: str = CallbackData.GALLERY.value) -> InlineKeyboardMarkup:
     return create_inline_keyboard([
         [{"text": "Да", "callback_data": CallbackData.CHANGE_CONTACT_YES.value}],
         [{"text": "Нет", "callback_data": CallbackData.CHANGE_CONTACT_NO.value}],
-        [{"text": "Назад", "callback_data": CallbackData.GALLERY.value}],
+        [{"text": "Назад", "callback_data": back_to}],
     ])
 
 def kb_admin_panel() -> InlineKeyboardMarkup:
@@ -1564,7 +1564,7 @@ async def cb_checkout_start(cb: CallbackQuery):
         if user.is_authorized:
             await cb.message.answer(
                 f"Проверьте данные:\n• ФИО: {user.full_name}\n• Телефон: {user.phone}\n• Email: {user.email}\n\nХотите изменить?",
-                reply_markup=kb_change_contact()
+                reply_markup=kb_change_contact(CallbackData.MENU.value)
             )
         else:
             await cb.message.answer(
