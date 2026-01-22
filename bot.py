@@ -1584,15 +1584,16 @@ async def cb_change_contact(cb: CallbackQuery):
         if not user:
             await cb.answer("Ошибка доступа", show_alert=True)
             return
-
         # Определяем, куда вести кнопку "Назад"
         back_callback = (
             CallbackData.MENU.value
             if user.is_authorized
             else CallbackData.GALLERY.value
         )
-
         if cb.data == CallbackData.CHANGE_CONTACT_YES.value:
+            # ДОБАВИТЬ ЗДЕСЬ: Установка флага awaiting_auth
+            user.awaiting_auth = True
+            sess.commit()  # Сохраняем немедленно
             await cb.message.answer(
                 "Введите новые данные:\nИмя Фамилия\n+7XXXXXXXXXX\nemail@example.com",
                 reply_markup=create_inline_keyboard([[
@@ -1609,7 +1610,6 @@ async def cb_change_contact(cb: CallbackQuery):
                     {"text": "Назад", "callback_data": back_callback}
                 ]])
             )
-
     await cb.answer()
 
 
