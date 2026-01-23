@@ -401,9 +401,48 @@ CODE_RE = re.compile(r"^\d{3}$")
 
 
 async def create_yookassa_payment(order: Order, amount_rub: int, description: str, return_url: str) -> dict:
-    lock = get_payment_lock(order.id)  # Получаем lock для заказа
-    async with lock:  # Блокируем на время создания
+    lock = get_payment_lock(order.id)
+    async with lock:
         try:
+            engine = make_engine(Config.DB_PATH)
+            with Session(engine) as sess:
+                user = get_user_by_id(sess, order.user_id)
+                if not user:
+                    raise ValueError("User not found for receipt")
+
+            # ───────────────────────────────────────────────
+            # Динамический выбор НДС и payment_mode
+            # ───────────────────────────────────────────────
+            is_prepayment = "pre" in description.lower()  # предоплата 30%
+
+            if is_prepayment:
+                vat_code = 6          # расчётная 20/120
+                payment_mode = "full_prepayment"
+            else:
+                vat_code = 4          # обычная 20%
+                payment_mode = "full_payment"
+
+            # Формируем receipt
+            receipt = {
+                "customer": {
+                    "email": user.email or "noemail@example.com",
+                    "phone": user.phone.replace("+", "") if user.phone else None
+                },
+                "items": [
+                    {
+                        "description": "Коробочка «Отпусти тревогу»",
+                        "quantity": "1.00",
+                        "amount": {
+                            "value": f"{amount_rub}.00",
+                            "currency": "RUB"
+                        },
+                        "vat_code": vat_code,
+                        "payment_mode": payment_mode,
+                        "payment_subject": "commodity"  # физический товар
+                    }
+                ]
+            }
+
             payment = Payment.create({
                 "amount": {
                     "value": f"{amount_rub}.00",
@@ -419,14 +458,21 @@ async def create_yookassa_payment(order: Order, amount_rub: int, description: st
                     "order_id": str(order.id),
                     "user_id": str(order.user_id),
                     "payment_kind": order.payment_kind or "unknown"
-                }
+                },
+                "receipt": receipt
             })
-            logger.info(f"Создан платёж ЮKassa #{payment.id} для заказа #{order.id} на {amount_rub}₽")
+
+            logger.info(
+                f"Создан платёж ЮKassa #{payment.id} для заказа #{order.id} на {amount_rub}₽ "
+                f"({description}) → vat_code={vat_code}, mode={payment_mode}"
+            )
+
             return {
                 "payment_id": payment.id,
                 "confirmation_url": payment.confirmation.confirmation_url,
                 "status": payment.status
             }
+
         except Exception as e:
             logger.exception(f"Ошибка создания платежа ЮKassa для заказа #{order.id}")
             await notify_admin(f"❌ Ошибка ЮKassa при создании платежа для заказа #{order.id}\n{e}")
@@ -1191,22 +1237,64 @@ async def cmd_admin_panel(message: Message):
         return
     await message.answer("Панель администратора:", reply_markup=kb_admin_panel())
 
+
 @r.callback_query(F.data == CallbackData.MENU.value)
 async def cb_menu(cb: CallbackQuery):
     logger.info(f"Menu callback: user_id={cb.from_user.id}, data={cb.data}")
+
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        user = get_user_by_id(sess, cb.from_user.id)
+        if not user:
+            await edit_or_send(cb.message, "Выбери действие:", kb_main())
+            await cb.answer()
+            return
+
+        # Проверяем, есть ли незавершённый процесс оформления
+        has_active_process = any([
+            user.awaiting_redeem_code,
+            user.awaiting_auth,
+            user.awaiting_gift_message,
+            user.awaiting_pvz_address,
+            user.awaiting_manual_pvz,
+            user.awaiting_manual_track,
+            user.pvz_for_order_id is not None,
+            user.temp_gift_order_id is not None,
+        ])
+
+        if has_active_process:
+            # Предупреждаем, но НЕ сбрасываем автоматически
+            await cb.message.answer(
+                "У вас сейчас активный процесс (ввод кода, оформление заказа и т.д.).\n\n"
+                "Если вернуться в меню сейчас - незавершённый заказ будет отменён.\n"
+                "Хотите продолжить или всё-таки отменить и вернуться?",
+                reply_markup=create_inline_keyboard([
+                    [{"text": "Продолжить оформление", "callback_data": "noop"}],  # просто закрыть
+                    [{"text": "Отменить всё и в меню", "callback_data": "force_menu_reset"}],
+                ])
+            )
+            await cb.answer("Есть активный процесс!")
+            return
+
+        # Если ничего активного нет — спокойно сбрасываем и идём в меню
+        reset_states(user)
+        await cb.message.answer("Все черновики (если были) отменены.")
+
+    await edit_or_send(cb.message, "Выбери действие:", kb_main())
+    await cb.answer()
+
+
+@r.callback_query(F.data == "force_menu_reset")
+async def cb_force_menu_reset(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         if user:
-            # Не сбрасываем состояния, если ждём код
-            if not user.awaiting_redeem_code:
-                reset_states(user)
-                await cb.message.answer("Все черновики заказов отменены. Если был незавершённый заказ - он отменён. Оплаченные заказы вы можете найти в Личном кабинете")
-            else:
-                await cb.message.answer("Сейчас вы вводите код — завершите или отмените его.")
-            sess.commit()
-    await edit_or_send(cb.message, "Выбери действие:", kb_main())
-    await cb.answer()
+            reset_states(user)  # здесь уже force не нужен, т.к. пользователь явно согласился
+            await cb.message.edit_text("Всё отменено. Возвращаемся в главное меню.")
+            await cb.message.answer("Выбери действие:", reply_markup=kb_main())
+    await cb.answer("Сброс выполнен")
+
 
 # ========== CABINET ==========
 @r.callback_query(F.data == CallbackData.CABINET.value)
@@ -2434,7 +2522,7 @@ async def send_payment_keyboard(msg: Message, order: Order):
         f"Итого: <b>{total_rub} ₽</b>\n"
         f"• Предоплата 30% = {prepay_rub} ₽\n"
         f"• Остаток = {remainder_rub} ₽\n\n"
-        f"После оплаты нажмите кнопку ниже или вернитесь в бот — статус обновится автоматически."
+        f"После оплаты нажмите кнопку ниже или вернитесь в бот - статус обновится автоматически."
     )
 
     await msg.answer(text, reply_markup=create_inline_keyboard(buttons))
@@ -3762,6 +3850,7 @@ async def handle_payment_success(message: Message):
             else:
                 text = "Оплата прошла, но тип оплаты неизвестен. Админ уже уведомлён."
 
+            logger.info(f"Оплата #{order.id} ({kind}) прошла → использован vat_code = {6 if kind == 'pre' else 4}")
             # Сохраняем ID платежа (на будущее)
             if not order.extra_data:
                 order.extra_data = {}
