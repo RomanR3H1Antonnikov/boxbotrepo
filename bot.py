@@ -644,14 +644,17 @@ async def notify_admins_payment_started(order: Order):
         f"Статус: {order.status}"
     )
 
-async def notify_admins_payment_success(order: Order):
+async def notify_admins_payment_success(order_id: int):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
+        order = sess.get(Order, order_id)
+        if not order:
+            return
         u = get_user_by_id(sess, order.user_id)
         full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
-        f"✅ Предоплата #{order.id} получена\n"
-        f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
+        f"✅ Предоплата #{order_id} получена\n"
+        f"Пользователь: {full_name} ({order.user_id})\n"
         f"Статус: {order.status}"
     )
 
@@ -669,37 +672,47 @@ async def notify_admins_order_ready(order_id: int):
         f"Статус: {order.status}"
     )
 
-async def notify_admins_payment_remainder(order: Order):
+async def notify_admins_payment_remainder(order_id: int):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
+        order = sess.get(Order, order_id)
+        if not order:
+            return
         u = get_user_by_id(sess, order.user_id)
         full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
-        f"💸 Заказ #{order.id} полностью оплачен\n"
-        f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
+        f"💸 Заказ #{order_id} полностью оплачен\n"
+        f"Пользователь: {full_name} ({order.user_id})\n"
         f"Статус: {order.status}"
     )
 
-async def notify_admins_order_shipped(order: Order):
+async def notify_admins_order_shipped(order_id: int):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
+        order = sess.get(Order, order_id)
+        if not order:
+            return
         u = get_user_by_id(sess, order.user_id)
         full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
-        f"🚚 Заказ #{order.id} отправлен\n"
-        f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
+        f"🚚 Заказ #{order_id} отправлен\n"
+        f"Пользователь: {full_name} ({order.user_id})\n"
         f"Трек: {order.track}\n"
         f"Статус: {order.status}"
     )
 
-async def notify_admins_order_archived(order: Order):
+async def notify_admins_order_archived(order_id: int):   # ← теперь принимает order_id
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
+        order = sess.get(Order, order_id)
+        if not order:
+            logger.warning(f"Заказ {order_id} не найден при уведомлении админа")
+            return
         u = get_user_by_id(sess, order.user_id)
         full_name = u.full_name if u else "Неизвестно"
     await notify_admin(
-        f"🗄 Заказ #{order.id} заархивирован\n"
-        f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
+        f"🗄 Заказ #{order_id} заархивирован\n"
+        f"Пользователь: {full_name} ({order.user_id})\n"
         f"Статус: {order.status}"
     )
 
@@ -716,10 +729,10 @@ async def notify_admins_order_address_changed(order: Order):
     )
 
 
-async def notify_client_order_assembled(order_id: int, message: Message):  # Переименуй
+async def notify_client_order_assembled(order_id: int, message: Message):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
-        order: Optional[Order] = sess.get(Order, order_id)
+        order = sess.get(Order, order_id)
         if order is None:
             logger.warning(f"Заказ {order_id} не найден при уведомлении клиента")
             return
@@ -729,14 +742,14 @@ async def notify_client_order_assembled(order_id: int, message: Message):  # П�
         text,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=kb_ready_message(order)  # Update kb if needed for assembled
+        reply_markup=kb_ready_message(order)
     )
 
 
 async def notify_client_order_shipped(order_id: int, message: Message):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
-        order: Optional[Order] = sess.get(Order, order_id)
+        order = sess.get(Order, order_id)
         if order is None:
             logger.warning(f"Заказ {order_id} не найден при уведомлении об отправке")
             return
@@ -1773,7 +1786,7 @@ async def cb_pay(cb: CallbackQuery):
 
                 # Уведомления (fresh order после commit не нужен, используем id)
                 if kind == "full":
-                    await notify_admins_payment_success(order)
+                    await notify_admins_payment_success(order.id)
                     await cb.message.answer(
                         "Полная оплата получена! ❤️\n\n"
                         f"Заказ <b>#{order.id}</b> принят в сборку.",
@@ -1781,7 +1794,7 @@ async def cb_pay(cb: CallbackQuery):
                     )
 
                 elif kind == "pre":
-                    await notify_admins_payment_success(order)
+                    await notify_admins_payment_success(order.id)
                     await cb.message.answer(
                         "Предоплата получена ❤️\n\n"
                         f"Заказ <b>#{order.id}</b> принят в сборку.",
@@ -1789,7 +1802,7 @@ async def cb_pay(cb: CallbackQuery):
                     )
 
                 elif kind == "rem":
-                    await notify_admins_payment_remainder(order)
+                    await notify_admins_payment_remainder(order.id)
                     await cb.message.answer(
                         "Дооплата получена ❤️\n\n"
                         f"Заказ <b>#{order.id}</b> готов к отправке.",
@@ -2052,7 +2065,7 @@ async def cb_admin_set_assembled(cb: CallbackQuery):
             sess.commit()
 
         # Уведомление клиенту о сборке
-        await notify_client_order_assembled(int(oid), cb.message)  # Переименуй функцию на notify_client_order_assembled если хочешь
+        await notify_client_order_assembled(oid, cb.message)  # Переименуй функцию на notify_client_order_assembled если хочешь
         await edit_or_send(cb.message, f"Заказ #{oid} собран.", kb_admin_panel())
         await cb.answer()
 
@@ -2088,7 +2101,7 @@ async def cb_admin_set_shipped(cb: CallbackQuery):
             # Reload fresh after create (which sets SHIPPED)
             order = sess.get(Order, oid)
 
-        await notify_client_order_shipped(int(order.id), cb.message)
+        await notify_client_order_shipped(order.id, cb.message)
         await edit_or_send(cb.message, f"Заказ #{oid} отправлен.", kb_admin_panel())
         await cb.answer()
 
@@ -2105,7 +2118,7 @@ async def cb_admin_set_archived(cb: CallbackQuery):
         oid = int(cb.data.split(":")[2])
 
         engine = make_engine(Config.DB_PATH)
-        with Session(engine) as sess:  # Добавили session!
+        with Session(engine) as sess:
             order = sess.get(Order, oid)
             if not order or order.status != OrderStatus.SHIPPED.value:
                 await cb.answer("Нельзя архивировать заказ", show_alert=True)
@@ -2118,9 +2131,12 @@ async def cb_admin_set_archived(cb: CallbackQuery):
             order.status = OrderStatus.ARCHIVED.value
             sess.commit()
 
-        await notify_admins_order_archived(order)  # order detached, but function reloads if needed
+        # Передаём только ID, а не detached объект
+        await notify_admins_order_archived(oid)   # ← изменили на oid
+
         await edit_or_send(cb.message, f"Заказ #{oid} заархивирован.", kb_admin_panel())
         await cb.answer()
+
     except Exception as e:
         logger.error(f"Admin set archived error: {e}")
         await notify_admin(f"❌ Ошибка архивирования заказа #{oid if 'oid' in locals() else 'неизвестный'}")
@@ -2827,7 +2843,7 @@ async def on_message_router(message: Message):
             user.temp_order_id_for_track = None
             sess.commit()
 
-            await notify_client_order_shipped(int(order.id), message)
+            await notify_client_order_shipped(order.id, cb.message)
             await message.answer(f"Трек {track} сохранён для #{order.id}. Заказ отправлен!", reply_markup=kb_admin_panel())
             return
 
@@ -3044,7 +3060,7 @@ async def handle_admin_command(message: Message, text: str):
                 order.track = track
                 sess.commit()
 
-            await notify_client_order_shipped(order_id, message)
+            await notify_client_order_shipped(order.id, cb.message)
             await message.answer(f"📦 Заказ #{order_id} отправлен! Трек: {track}")
 
         elif action == "archived":
@@ -3055,7 +3071,7 @@ async def handle_admin_command(message: Message, text: str):
             order.status = OrderStatus.ARCHIVED.value
             sess.commit()
 
-            await notify_admins_order_archived(order)
+            await notify_admins_order_archived(order.id)
             await message.answer(f"🗄 Заказ #{order_id} заархивирован")
 
         else:
