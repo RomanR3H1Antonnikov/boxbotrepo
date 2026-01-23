@@ -2513,7 +2513,7 @@ async def on_message_router(message: Message):
         if user.awaiting_redeem_code:
             # Проверяем, что введено ровно 3 цифры
             if not CODE_RE.match(text):
-                await message.answer("Код должен состоять из **3 цифр**. Попробуйте ещё раз.")
+                await message.answer("Код должен состоять из <b>3 цифр</b>. Попробуйте ещё раз.")
                 return
 
             code = text.strip()
@@ -3601,7 +3601,16 @@ async def main():
 
     # Засеиваем данные
     with Session(engine) as sess:
-        seed_data(sess, anxiety_codes=None)
+        # Читай коды из файла promocodes.txt
+        try:
+            with open("INFO_FOR_DB/PROMOCODES/promocodes.txt", "r", encoding="utf-8") as f:
+                codes = [line.strip() for line in f if line.strip().isdigit() and len(line.strip()) == 3]
+            logger.info(f"Загружено {len(codes)} кодов из promocodes.txt")
+        except FileNotFoundError:
+            logger.error("Файл promocodes.txt НЕ НАЙДЕН! Коды НЕ загружены!")
+            codes = []
+
+        seed_data(sess, anxiety_codes=codes)
         sess.commit()
 
     await asyncio.sleep(15)
