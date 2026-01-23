@@ -257,20 +257,21 @@ class CallbackData(Enum):
     ADMIN_ORDERS_READY = "admin:orders_ready"
     ADMIN_ORDERS_SHIPPED = "admin:orders_shipped"
     ADMIN_ORDERS_ARCHIVED = "admin:orders_archived"
+    ADMIN_ORDERS_TO_SHIP = "admin:orders_to_ship"  # Новое: "Готовые к отправке"
+    ADMIN_SET_ASSEMBLED = "admin:set_assembled"   # Переименуй старый set_ready
+    ADMIN_SET_SHIPPED = "admin:set_shipped"        # Новое: для отправки
     ADMIN_SET_READY = "admin:set_ready"
-    ADMIN_SET_SHIPPED = "admin:set_shipped"
     ADMIN_SET_ARCHIVED = "admin:set_archived"
     ADMIN_SET_TRACK = "admin:set_track"
 
 class OrderStatus(Enum):
     NEW = "new"
-    PENDING = "pending"
-    PREPAID = "prepaid"
-    READY = "ready"
-    PAID = "paid"
-    SHIPPED = "shipped"
-    ARCHIVED = "archived"
-    ABANDONED = "abandoned"
+    PAID_PARTIALLY = "paid_partially"  # После предоплаты 30%
+    PAID_FULL = "paid_full"            # После полной оплаты или дооплаты
+    ASSEMBLED = "assembled"           # Собран админом
+    SHIPPED = "shipped"                # Отправлен (CDEK создан)
+    ARCHIVED = "archived"              # Завершён
+    ABANDONED = "abandoned"            # Отменён
 
 class Config:
     TOKEN = os.getenv("BOT_TOKEN")
@@ -715,11 +716,11 @@ async def notify_admins_order_address_changed(order: Order):
     )
 
 
-async def notify_client_order_ready(order_id: int, message: Message):
+async def notify_client_order_assembled(order_id: int, message: Message):  # Переименуй
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
-        order: Optional[Order] = sess.get(Order, order_id)  # Type hint: Optional[Order]
-        if order is None:  # Explicit check
+        order: Optional[Order] = sess.get(Order, order_id)
+        if order is None:
             logger.warning(f"Заказ {order_id} не найден при уведомлении клиента")
             return
 
@@ -728,7 +729,7 @@ async def notify_client_order_ready(order_id: int, message: Message):
         text,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=kb_ready_message(order)
+        reply_markup=kb_ready_message(order)  # Update kb if needed for assembled
     )
 
 
@@ -948,6 +949,7 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
     return create_inline_keyboard([
         [{"text": "Заказы для сборки", "callback_data": CallbackData.ADMIN_ORDERS_PREPAID.value}],
         [{"text": "Заказы, ожидающие дооплаты", "callback_data": CallbackData.ADMIN_ORDERS_READY.value}],
+        [{"text": "Заказы готовые к отправке", "callback_data": CallbackData.ADMIN_ORDERS_TO_SHIP.value}],
         [{"text": "Отправленные заказы", "callback_data": CallbackData.ADMIN_ORDERS_SHIPPED.value}],
         [{"text": "Архив заказов", "callback_data": CallbackData.ADMIN_ORDERS_ARCHIVED.value}],
         [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
@@ -963,17 +965,23 @@ def kb_admin_orders(orders: List[Order]) -> InlineKeyboardMarkup:
     rows.append([{"text": "Назад", "callback_data": CallbackData.ADMIN_PANEL.value}])
     return create_inline_keyboard(rows)
 
+
 def kb_admin_order_actions(order: Order) -> InlineKeyboardMarkup:
     buttons = []
-    if order.status == OrderStatus.PREPAID.value:
-        buttons.append([{"text": "Готов к отправке", "callback_data": f"{CallbackData.ADMIN_SET_READY.value}:{order.id}"}])
-    if order.status in [OrderStatus.READY.value, OrderStatus.PAID.value] and not order.track:
-        if order.extra_data.get("manual_pvz", False):  # ← ДОБАВИТЬ УСЛОВИЕ
+    # Для сборки (если PAID_PARTIALLY или PAID_FULL)
+    if order.status in [OrderStatus.PAID_PARTIALLY.value, OrderStatus.PAID_FULL.value]:
+        buttons.append([{"text": "Собран", "callback_data": f"{CallbackData.ADMIN_SET_ASSEMBLED.value}:{order.id}"}])
+    # Для отправки (если ASSEMBLED и PAID_FULL, no track)
+    if order.status == OrderStatus.ASSEMBLED.value and order.payment_kind in ["full", "remainder"] and not order.track:
+        buttons.append([{"text": "Отправить", "callback_data": f"{CallbackData.ADMIN_SET_SHIPPED.value}:{order.id}"}])
+        if order.extra_data.get("manual_pvz", False):
             buttons.append([{"text": "Ввести трек вручную", "callback_data": f"{CallbackData.ADMIN_SET_TRACK.value}:{order.id}"}])
+    # Для архива (SHIPPED)
     elif order.status == OrderStatus.SHIPPED.value:
         buttons.append([{"text": "Архивировать", "callback_data": f"{CallbackData.ADMIN_SET_ARCHIVED.value}:{order.id}"}])
     buttons.append([{"text": "Назад", "callback_data": CallbackData.ADMIN_PANEL.value}])
     return create_inline_keyboard(buttons)
+
 
 # ========== UTILS ==========
 def format_order_review(order: Order) -> str:
@@ -1006,9 +1014,9 @@ def format_order_admin(order: Order) -> str:
 def format_client_order_info(order: Order) -> str:
     status_map = {
         OrderStatus.NEW.value: "🆕 Новый заказ",
-        OrderStatus.PREPAID.value: "✅ Предоплачен (30%)",
-        OrderStatus.READY.value: "📦 Готов к отправке — ждём дооплату",
-        OrderStatus.PAID.value: "💳 Полностью оплачен",
+        OrderStatus.PAID_PARTIALLY.value: "✅ Предоплачен (30%), ждём сборки",
+        OrderStatus.PAID_FULL.value: "💳 Полностью оплачен, ждём сборки",
+        OrderStatus.ASSEMBLED.value: "📦 Собран — ждём дооплату" if order.payment_kind == "pre" else "📦 Собран — скоро отправим",
         OrderStatus.SHIPPED.value: "🚚 Отправлен",
         OrderStatus.ARCHIVED.value: "✅ Доставлен и завершён",
         OrderStatus.ABANDONED.value: "❌ Отменён",
@@ -1137,7 +1145,7 @@ async def cb_menu(cb: CallbackQuery):
             # Не сбрасываем состояния, если ждём код
             if not user.awaiting_redeem_code:
                 reset_states(user)
-                await cb.message.answer("Все текущие действия отменены. Если был незавершённый заказ - он отменён.")
+                await cb.message.answer("Все черновики заказов отменены. Если был незавершённый заказ - он отменён. Оплаченные заказы вы можете найти в Личном кабинете")
             else:
                 await cb.message.answer("Сейчас вы вводите код — завершите или отмените его.")
             sess.commit()
@@ -1711,7 +1719,7 @@ async def cb_pay(cb: CallbackQuery):
     async with lock:
         try:
             engine = make_engine(Config.DB_PATH)
-            need_cdek_create = False
+            need_cdek_create = False  # Никогда не создаём CDEK автоматически!
 
             with Session(engine) as sess:
                 order = sess.get(Order, oid)
@@ -1721,14 +1729,14 @@ async def cb_pay(cb: CallbackQuery):
                     return
 
                 if order.status in (
-                    OrderStatus.PAID.value,
-                    OrderStatus.SHIPPED.value,
-                    OrderStatus.ARCHIVED.value
+                        OrderStatus.PAID_FULL.value,
+                        OrderStatus.SHIPPED.value,
+                        OrderStatus.ARCHIVED.value
                 ):
                     await cb.answer("Этот заказ уже оплачен", show_alert=True)
                     return
 
-                # Гарантия цены
+                # Гарантия цены (если не установлена)
                 if order.total_price_kop == 0:
                     delivery_cost = (order.extra_data or {}).get("delivery_cost", 590)
                     total = Config.PRICE_RUB + delivery_cost
@@ -1737,31 +1745,25 @@ async def cb_pay(cb: CallbackQuery):
                     order.remainder_amount = (total - prepay) * 100
 
                 if kind == "full":
-                    if order.status not in (OrderStatus.NEW.value, OrderStatus.PREPAID.value, OrderStatus.READY.value):
+                    if order.status != OrderStatus.NEW.value:
                         await cb.answer("Нельзя оплатить этот заказ", show_alert=True)
                         return
-
                     order.payment_kind = "full"
-                    order.status = OrderStatus.PAID.value
-                    need_cdek_create = True
+                    order.status = OrderStatus.PAID_FULL.value  # Ждёт сборки
 
                 elif kind == "pre":
                     if order.status != OrderStatus.NEW.value:
                         await cb.answer("Предоплата уже внесена", show_alert=True)
                         return
-
                     order.payment_kind = "pre"
-                    order.status = OrderStatus.PREPAID.value
+                    order.status = OrderStatus.PAID_PARTIALLY.value  # Ждёт сборки
 
                 elif kind == "rem":
-
-                    if order.status != OrderStatus.READY.value:  # ← Добавьте: дооплата только если собран
+                    if order.status != OrderStatus.ASSEMBLED.value or order.payment_kind != "pre":
                         await cb.answer("Заказ не готов к дооплате", show_alert=True)
                         return
-
-                    order.payment_kind = "remainder"
-                    order.status = OrderStatus.PAID.value
-                    need_cdek_create = True
+                    order.payment_kind = "remainder"  # Или "full" после
+                    order.status = OrderStatus.PAID_FULL.value  # Теперь ждёт отправки (после сборки уже)
 
                 else:
                     await cb.answer("Ошибка типа оплаты", show_alert=True)
@@ -1769,12 +1771,12 @@ async def cb_pay(cb: CallbackQuery):
 
                 sess.commit()
 
-                # Уведомления сразу после коммита (order ещё валиден)
+                # Уведомления (fresh order после commit не нужен, используем id)
                 if kind == "full":
                     await notify_admins_payment_success(order)
                     await cb.message.answer(
                         "Полная оплата получена! ❤️\n\n"
-                        f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
+                        f"Заказ <b>#{order.id}</b> принят в сборку.",
                         reply_markup=kb_order_status(order)
                     )
 
@@ -1790,7 +1792,7 @@ async def cb_pay(cb: CallbackQuery):
                     await notify_admins_payment_remainder(order)
                     await cb.message.answer(
                         "Дооплата получена ❤️\n\n"
-                        f"Заказ <b>#{order.id}</b> передаётся в СДЭК.",
+                        f"Заказ <b>#{order.id}</b> готов к отправке.",
                         reply_markup=kb_order_status(order)
                     )
 
@@ -1799,26 +1801,6 @@ async def cb_pay(cb: CallbackQuery):
                 if user:
                     reset_states(user)
                 sess.commit()
-
-            # Создание заказа в СДЭК — ВНЕ сессии
-            if need_cdek_create:
-                success = await create_cdek_order(oid)
-
-                if success:
-                    # Перечитываем свежий заказ для уведомления админу
-                    with Session(engine) as sess:
-                        fresh_order = sess.get(Order, oid)
-                        if fresh_order:
-                            await notify_admins_order_shipped(fresh_order)
-                else:
-                    # Откат статуса при ошибке СДЭК
-                    with Session(engine) as sess:
-                        order_rollback = sess.get(Order, oid)
-                        if order_rollback:
-                            order_rollback.status = OrderStatus.READY.value
-                            sess.commit()
-                    await notify_admin(f"⚠️ СДЭК не принял заказ #{oid}, требуется внимание")
-
             await cb.answer()
 
         except Exception as e:
@@ -1927,33 +1909,45 @@ async def cb_admin_panel(cb: CallbackQuery):
     await edit_or_send(cb.message, "Панель администратора:", kb_admin_panel())
     await cb.answer()
 
+
 @r.callback_query(F.data == CallbackData.ADMIN_ORDERS_PREPAID.value)
 async def cb_admin_orders_prepaid(cb: CallbackQuery):
     logger.info(f"Orders prepaid callback: user_id={cb.from_user.id}, data={cb.data}")
     if not await is_admin(cb):
-        logger.info("Admin access denied")
         await cb.answer("Доступ запрещён", show_alert=True)
         return
-    orders = get_all_orders_by_status(OrderStatus.PREPAID.value)
+    # Заказы для сборки: PAID_PARTIALLY или PAID_FULL
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        stmt = select(Order).where(Order.status.in_([OrderStatus.PAID_PARTIALLY.value, OrderStatus.PAID_FULL.value]))
+        orders = list(sess.scalars(stmt).all())
     if not orders:
         await edit_or_send(cb.message, "Нет заказов для сборки.", kb_admin_panel())
     else:
         await edit_or_send(cb.message, "Заказы для сборки:", kb_admin_orders(orders))
     await cb.answer()
 
+
 @r.callback_query(F.data == CallbackData.ADMIN_ORDERS_READY.value)
 async def cb_admin_orders_ready(cb: CallbackQuery):
     logger.info(f"Orders ready callback: user_id={cb.from_user.id}, data={cb.data}")
     if not await is_admin(cb):
-        logger.info("Admin access denied")
         await cb.answer("Доступ запрещён", show_alert=True)
         return
-    orders = [o for o in get_all_orders_by_status(OrderStatus.READY.value) if o.payment_kind == "pre"]
+    # Ожидающие дооплаты: ASSEMBLED и payment_kind == "pre" (PAID_PARTIALLY)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        stmt = select(Order).where(
+            Order.status == OrderStatus.ASSEMBLED.value,
+            Order.payment_kind == "pre"
+        )
+        orders = list(sess.scalars(stmt).all())
     if not orders:
-        await edit_or_send(cb.message, "Нет заказов с дооплатой или готовых к отправке.", kb_admin_panel())
+        await edit_or_send(cb.message, "Нет заказов, ожидающих дооплаты.", kb_admin_panel())
     else:
-        await edit_or_send(cb.message, "Заказы с дооплатой или готовые к отправке:", kb_admin_orders(orders))
+        await edit_or_send(cb.message, "Заказы, ожидающие дооплаты:", kb_admin_orders(orders))
     await cb.answer()
+
 
 @r.callback_query(F.data == CallbackData.ADMIN_ORDERS_SHIPPED.value)
 async def cb_admin_orders_shipped(cb: CallbackQuery):
@@ -1968,6 +1962,28 @@ async def cb_admin_orders_shipped(cb: CallbackQuery):
     else:
         await edit_or_send(cb.message, "Отправленные заказы:", kb_admin_orders(orders))
     await cb.answer()
+
+
+@r.callback_query(F.data == CallbackData.ADMIN_ORDERS_TO_SHIP.value)
+async def cb_admin_orders_to_ship(cb: CallbackQuery):
+    logger.info(f"Orders to ship callback: user_id={cb.from_user.id}, data={cb.data}")
+    if not await is_admin(cb):
+        await cb.answer("Доступ запрещён", show_alert=True)
+        return
+    # Заказы ASSEMBLED и PAID_FULL
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        stmt = select(Order).where(
+            Order.status == OrderStatus.ASSEMBLED.value,
+            Order.payment_kind.in_(['full', 'remainder'])  # full or after rem
+        )
+        orders = list(sess.scalars(stmt).all())
+    if not orders:
+        await edit_or_send(cb.message, "Нет заказов готовых к отправке.", kb_admin_panel())
+    else:
+        await edit_or_send(cb.message, "Заказы готовые к отправке:", kb_admin_orders(orders))
+    await cb.answer()
+
 
 @r.callback_query(F.data == CallbackData.ADMIN_ORDERS_ARCHIVED.value)
 async def cb_admin_orders_archived(cb: CallbackQuery):
@@ -2015,61 +2031,101 @@ async def cb_admin_order_details(cb: CallbackQuery):
         await cb.answer("Ошибка просмотра заказа", show_alert=True)
 
 
-@r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_READY.value))
-async def cb_admin_set_ready(cb: CallbackQuery):
-    logger.info(f"Set ready callback: user_id={cb.from_user.id}, data={cb.data}")
+@r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_ASSEMBLED.value))
+async def cb_admin_set_assembled(cb: CallbackQuery):
+    logger.info(f"Set assembled callback: user_id={cb.from_user.id}, data={cb.data}")
     try:
-        oid = int(cb.data.split(":")[2])  # admin:set_ready:1
+        oid = int(cb.data.split(":")[2])
 
         engine = make_engine(Config.DB_PATH)
         with Session(engine) as sess:
             order = sess.get(Order, oid)
-            if not order or order.status != OrderStatus.PREPAID.value:
-                await cb.answer("Нельзя перевести в готовность", show_alert=True)
+            if not order or order.status not in [OrderStatus.PAID_PARTIALLY.value, OrderStatus.PAID_FULL.value]:
+                await cb.answer("Нельзя собрать этот заказ", show_alert=True)
                 return
 
             if not await is_admin(cb):
-                logger.info("Admin access denied")
                 await cb.answer("Доступ запрещён", show_alert=True)
                 return
 
-            order.status = OrderStatus.READY.value
+            order.status = OrderStatus.ASSEMBLED.value
             sess.commit()
 
-        await notify_client_order_ready(int(order.id), cb.message)
-        await edit_or_send(cb.message, f"Заказ #{oid} готов к отправке.", kb_admin_panel())
+        # Уведомление клиенту о сборке
+        await notify_client_order_assembled(int(oid), cb.message)  # Переименуй функцию на notify_client_order_assembled если хочешь
+        await edit_or_send(cb.message, f"Заказ #{oid} собран.", kb_admin_panel())
         await cb.answer()
 
     except Exception as e:
-        logger.error(f"Admin set ready error: {e}")
-        await notify_admin(
-            f"❌ Ошибка перевода заказа #{oid if 'oid' in locals() else 'неизвестный'} в готовность"
-        )
+        logger.error(f"Admin set assembled error: {e}")
+        await notify_admin(f"❌ Ошибка сборки заказа #{oid if 'oid' in locals() else 'неизвестный'}")
         await cb.answer("Ошибка", show_alert=True)
 
+
+@r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_SHIPPED.value))
+async def cb_admin_set_shipped(cb: CallbackQuery):
+    logger.info(f"Set shipped callback: user_id={cb.from_user.id}, data={cb.data}")
+    try:
+        oid = int(cb.data.split(":")[2])
+
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:
+            order = sess.get(Order, oid)
+            if not order or order.status != OrderStatus.ASSEMBLED.value or order.payment_kind not in ["full", "remainder"]:
+                await cb.answer("Нельзя отправить этот заказ", show_alert=True)
+                return
+
+            if not await is_admin(cb):
+                await cb.answer("Доступ запрещён", show_alert=True)
+                return
+
+            # Создаём CDEK
+            success = await create_cdek_order(oid)
+            if not success:
+                await cb.answer("Ошибка создания заказа в CDEK", show_alert=True)
+                return
+
+            # Reload fresh after create (which sets SHIPPED)
+            order = sess.get(Order, oid)
+
+        await notify_client_order_shipped(int(order.id), cb.message)
+        await edit_or_send(cb.message, f"Заказ #{oid} отправлен.", kb_admin_panel())
+        await cb.answer()
+
+    except Exception as e:
+        logger.error(f"Admin set shipped error: {e}")
+        await notify_admin(f"❌ Ошибка отправки заказа #{oid if 'oid' in locals() else 'неизвестный'}")
+        await cb.answer("Ошибка", show_alert=True)
 
 
 @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_ARCHIVED.value))
 async def cb_admin_set_archived(cb: CallbackQuery):
     logger.info(f"Set archived callback: user_id={cb.from_user.id}, data={cb.data}")
     try:
-        oid = int(cb.data.split(":")[2])  # Извлекаем oid из третьей части (admin:set_archived:1)
-        order = get_order_admin(oid)
-        if not order or order.status not in [OrderStatus.PAID.value, OrderStatus.SHIPPED.value]:
-            await cb.answer("Нельзя архивировать заказ", show_alert=True)
-            return
-        if not await is_admin(cb):
-            logger.info("Admin access denied")
-            await cb.answer("Доступ запрещён", show_alert=True)
-            return
-        order.status = OrderStatus.ARCHIVED.value
-        await notify_admins_order_archived(order)
+        oid = int(cb.data.split(":")[2])
+
+        engine = make_engine(Config.DB_PATH)
+        with Session(engine) as sess:  # Добавили session!
+            order = sess.get(Order, oid)
+            if not order or order.status != OrderStatus.SHIPPED.value:
+                await cb.answer("Нельзя архивировать заказ", show_alert=True)
+                return
+
+            if not await is_admin(cb):
+                await cb.answer("Доступ запрещён", show_alert=True)
+                return
+
+            order.status = OrderStatus.ARCHIVED.value
+            sess.commit()
+
+        await notify_admins_order_archived(order)  # order detached, but function reloads if needed
         await edit_or_send(cb.message, f"Заказ #{oid} заархивирован.", kb_admin_panel())
         await cb.answer()
     except Exception as e:
         logger.error(f"Admin set archived error: {e}")
         await notify_admin(f"❌ Ошибка архивирования заказа #{oid if 'oid' in locals() else 'неизвестный'}")
         await cb.answer("Ошибка", show_alert=True)
+
 
 @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_TRACK.value))
 async def cb_admin_set_track(cb: CallbackQuery):
@@ -2903,8 +2959,8 @@ async def handle_admin_command(message: Message, text: str):
     parts = text.split()
     if len(parts) < 2:
         await message.answer(
-            "Использование: /admin <действие> [order_id] [track]\n"
-            "Действия: list, ready, shipped, archived"
+            "Использование: /admin <действие> [order_id] [трек]\n"
+            "Действия: list, assembled, shipped, archived"
         )
         return
 
@@ -2912,8 +2968,8 @@ async def handle_admin_command(message: Message, text: str):
     args = parts[2:]
 
     engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
 
+    with Session(engine) as sess:
         if action == "list":
             all_orders = sess.scalars(select(Order)).all()
             if not all_orders:
@@ -2923,61 +2979,87 @@ async def handle_admin_command(message: Message, text: str):
             def tag(o: Order) -> str:
                 return {
                     OrderStatus.NEW.value: "new",
-                    OrderStatus.PREPAID.value: "prepaid",
-                    OrderStatus.READY.value: "ready",
-                    OrderStatus.PAID.value: "paid",
+                    OrderStatus.PAID_PARTIALLY.value: "paid_partially",
+                    OrderStatus.PAID_FULL.value: "paid_full",
+                    OrderStatus.ASSEMBLED.value: "assembled",
                     OrderStatus.SHIPPED.value: "shipped",
                     OrderStatus.ARCHIVED.value: "archived",
+                    OrderStatus.ABANDONED.value: "abandoned",
                 }.get(o.status, o.status)
 
             rows = [f"#{o.id}: {tag(o)} | {o.address or '—'} | user_{o.user_id}" for o in all_orders]
-            await message.answer("Заказы:\n" + "\n".join(rows[:50]))  # лимит, чтобы не спамить
+            await message.answer("Заказы:\n" + "\n".join(rows[:50]))
+            return
 
-        elif action in ["ready", "shipped", "archived"]:
-            if not args or not args[0].isdigit():
-                await message.answer(f"Укажите order_id. Пример: /admin {action} 1")
+        # Все остальные действия требуют order_id
+        if not args or not args[0].isdigit():
+            await message.answer(f"Укажите order_id. Пример: /admin {action} 1")
+            return
+
+        order_id = int(args[0])
+        order = sess.get(Order, order_id)
+
+        if not order:
+            await message.answer(f"Заказ #{order_id} не найден.")
+            return
+
+        if action == "assembled":
+            # Собираем заказ (переводим в ASSEMBLED)
+            if order.status not in [OrderStatus.PAID_PARTIALLY.value, OrderStatus.PAID_FULL.value]:
+                await message.answer("Заказ можно собрать только если он оплачен частично или полностью.")
                 return
 
-            order_id = int(args[0])
-            order = sess.get(Order, order_id)
-            if not order:
-                await message.answer(f"Заказ #{order_id} не найден.")
-                return
-
-            if action == "ready":
-                if order.status != OrderStatus.PREPAID.value:
-                    await message.answer("Заказ не в статусе предоплаты.")
-                    return
-                order.status = OrderStatus.READY.value
-                await notify_client_order_ready(order, message)
-                await message.answer(f"Заказ #{order_id} переведён в READY")
-
-            elif action == "shipped":
-                track = args[1] if len(args) > 1 else None
-                if not track:
-                    await message.answer("Укажите трек-номер: /admin shipped 1 ТРЕК123")
-                    return
-                if order.status not in [OrderStatus.READY.value, OrderStatus.PAID.value]:
-                    await message.answer("Заказ не готов к отправке.")
-                    return
-                order.status = OrderStatus.SHIPPED.value
-                # предположим, что в модели Order есть поле track (строка)
-                order.track = track
-                await notify_client_order_shipped(int(order.id), message)
-                await message.answer(f"📦 Заказ #{order_id} отправлен! Трек: {track}")
-
-            elif action == "archived":
-                if order.status not in [OrderStatus.PAID.value, OrderStatus.SHIPPED.value]:
-                    await message.answer("Заказ не может быть заархивирован.")
-                    return
-                order.status = OrderStatus.ARCHIVED.value
-                await notify_admins_order_archived(order)
-                await message.answer(f"🗄 Заказ #{order_id} заархивирован")
-
+            order.status = OrderStatus.ASSEMBLED.value
             sess.commit()
 
+            # Уведомляем клиента
+            await notify_client_order_assembled(order_id, message)
+            await message.answer(f"Заказ #{order_id} собран и готов к отправке (или к дооплате).")
+
+        elif action == "shipped":
+            # Отправляем заказ (создаём в СДЭК)
+            track = args[1] if len(args) > 1 else None
+
+            if not track:
+                await message.answer("Укажите трек-номер: /admin shipped 1 ТРЕК123")
+                return
+
+            if order.status != OrderStatus.ASSEMBLED.value:
+                await message.answer("Заказ можно отправить только после сборки (статус assembled).")
+                return
+
+            if order.payment_kind not in ["full", "remainder"]:
+                await message.answer("Заказ должен быть полностью оплачен.")
+                return
+
+            # Создаём заказ в СДЭК
+            success = await create_cdek_order(order_id)
+            if not success:
+                await message.answer(f"Ошибка создания заказа в СДЭК для #{order_id}")
+                return
+
+            # Обновляем трек (create_cdek_order уже должен это сделать)
+            sess.refresh(order)
+            if order.track != track:
+                order.track = track
+                sess.commit()
+
+            await notify_client_order_shipped(order_id, message)
+            await message.answer(f"📦 Заказ #{order_id} отправлен! Трек: {track}")
+
+        elif action == "archived":
+            if order.status != OrderStatus.SHIPPED.value:
+                await message.answer("Архивировать можно только отправленные заказы (shipped).")
+                return
+
+            order.status = OrderStatus.ARCHIVED.value
+            sess.commit()
+
+            await notify_admins_order_archived(order)
+            await message.answer(f"🗄 Заказ #{order_id} заархивирован")
+
         else:
-            await message.answer("Неизвестное действие. Доступно: list, ready, shipped, archived")
+            await message.answer("Неизвестное действие. Доступно: list, assembled, shipped, archived")
 
 # ========== НОВЫЕ ФУНКЦИИ СДЭК ==========
 async def get_cdek_city_code(city_name: str) -> Optional[int]:
