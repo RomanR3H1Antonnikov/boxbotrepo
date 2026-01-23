@@ -654,14 +654,17 @@ async def notify_admins_payment_success(order: Order):
         f"Статус: {order.status}"
     )
 
-async def notify_admins_order_ready(order: Order):
+async def notify_admins_order_ready(order_id: int):
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
-        u = get_user_by_id(sess, order.user_id)
-        full_name = u.full_name if u else "Неизвестно"
+        from sqlalchemy.orm import joinedload  # импортируйте в начале файла, если нет
+        order = sess.query(Order).options(joinedload(Order.user)).get(order_id)
+        if not order:
+            return
+        full_name = order.user.full_name if order.user else "Неизвестно"
     await notify_admin(
-        f"📦 Заказ #{order.id} собран\n"
-        f"Пользователь: {u.full_name or 'Не авторизован'} ({order.user_id})\n"
+        f"📦 Заказ #{order_id} собран\n"
+        f"Пользователь: {full_name} ({order.user_id})\n"
         f"Статус: {order.status}"
     )
 
@@ -712,8 +715,14 @@ async def notify_admins_order_address_changed(order: Order):
     )
 
 
+async def notify_client_order_ready(order_id: int, message: Message):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        order: Optional[Order] = sess.get(Order, order_id)  # Type hint: Optional[Order]
+        if order is None:  # Explicit check
+            logger.warning(f"Заказ {order_id} не найден при уведомлении клиента")
+            return
 
-async def notify_client_order_ready(order: Order, message: Message):
     text = format_client_order_info(order)
     await message.answer(
         text,
@@ -722,7 +731,15 @@ async def notify_client_order_ready(order: Order, message: Message):
         reply_markup=kb_ready_message(order)
     )
 
-async def notify_client_order_shipped(order: Order, message: Message):
+
+async def notify_client_order_shipped(order_id: int, message: Message):
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        order: Optional[Order] = sess.get(Order, order_id)
+        if order is None:
+            logger.warning(f"Заказ {order_id} не найден при уведомлении об отправке")
+            return
+
     text = format_client_order_info(order)
     await message.answer(
         text,
@@ -730,6 +747,7 @@ async def notify_client_order_shipped(order: Order, message: Message):
         disable_web_page_preview=True,
         reply_markup=kb_order_status(order)
     )
+
 
 async def notify_client_order_abandoned(order: Order, message: Message):
     await message.answer(
@@ -939,8 +957,9 @@ def kb_admin_orders(orders: List[Order]) -> InlineKeyboardMarkup:
     rows = []
     for order in orders:
         rows.append([
-            {"text": f"Заказ #{order.id} ({order.status})", "callback_data": f"admin:order:{order.id}"}
-        ])
+            {
+                "text": f"Заказ #{order.id} ({order.status}) {'full' if order.payment_kind == 'full' else 'pre' if order.payment_kind == 'pre' else ''}",
+                "callback_data": f"admin:order:{order.id}"}        ])
     rows.append([{"text": "Назад", "callback_data": CallbackData.ADMIN_PANEL.value}])
     return create_inline_keyboard(rows)
 
@@ -1098,7 +1117,7 @@ async def cmd_menu(message: Message):
         user = get_user_by_id(sess, message.from_user.id)
         if user:
             reset_states(user)
-            await message.answer("Все текущие действия отменены. Если был незавершённый заказ - он отменён.")
+            await message.answer("Все черновики заказов отменены. Если был незавершённый заказ - он отменён. Оплаченные заказы вы можете найти в Личном кабинете")
             sess.commit()
     await message.answer("Выбери действие:", reply_markup=kb_main())
 
@@ -1735,8 +1754,9 @@ async def cb_pay(cb: CallbackQuery):
                     order.status = OrderStatus.PREPAID.value
 
                 elif kind == "rem":
-                    if order.status not in (OrderStatus.PREPAID.value, OrderStatus.READY.value):
-                        await cb.answer("Этот заказ нельзя дооплатить", show_alert=True)
+
+                    if order.status != OrderStatus.READY.value:  # ← Добавьте: дооплата только если собран
+                        await cb.answer("Заказ не готов к дооплате", show_alert=True)
                         return
 
                     order.payment_kind = "remainder"
@@ -1928,7 +1948,7 @@ async def cb_admin_orders_ready(cb: CallbackQuery):
         logger.info("Admin access denied")
         await cb.answer("Доступ запрещён", show_alert=True)
         return
-    orders = get_all_orders_by_status(OrderStatus.READY.value)
+    orders = [o for o in get_all_orders_by_status(OrderStatus.READY.value) if o.payment_kind == "pre"]
     if not orders:
         await edit_or_send(cb.message, "Нет заказов с дооплатой или готовых к отправке.", kb_admin_panel())
     else:
@@ -2016,8 +2036,7 @@ async def cb_admin_set_ready(cb: CallbackQuery):
             order.status = OrderStatus.READY.value
             sess.commit()
 
-        await notify_admins_order_ready(order)
-        await notify_client_order_ready(order, cb.message)
+        await notify_client_order_ready(int(order.id), cb.message)
         await edit_or_send(cb.message, f"Заказ #{oid} готов к отправке.", kb_admin_panel())
         await cb.answer()
 
@@ -2752,8 +2771,7 @@ async def on_message_router(message: Message):
             user.temp_order_id_for_track = None
             sess.commit()
 
-            await notify_admins_order_shipped(order)
-            await notify_client_order_shipped(order, message)
+            await notify_client_order_shipped(int(order.id), message)
             await message.answer(f"Трек {track} сохранён для #{order.id}. Заказ отправлен!", reply_markup=kb_admin_panel())
             return
 
@@ -2931,7 +2949,6 @@ async def handle_admin_command(message: Message, text: str):
                     await message.answer("Заказ не в статусе предоплаты.")
                     return
                 order.status = OrderStatus.READY.value
-                await notify_admins_order_ready(order)
                 await notify_client_order_ready(order, message)
                 await message.answer(f"Заказ #{order_id} переведён в READY")
 
@@ -2946,8 +2963,7 @@ async def handle_admin_command(message: Message, text: str):
                 order.status = OrderStatus.SHIPPED.value
                 # предположим, что в модели Order есть поле track (строка)
                 order.track = track
-                await notify_admins_order_shipped(order)
-                await notify_client_order_shipped(order, message)
+                await notify_client_order_shipped(int(order.id), message)
                 await message.answer(f"📦 Заказ #{order_id} отправлен! Трек: {track}")
 
             elif action == "archived":
@@ -3488,8 +3504,11 @@ async def check_all_shipped_orders():
             logger.info("Запуск проверки статусов СДЭК...")
             orders_to_check = get_all_orders_by_status(OrderStatus.SHIPPED.value)
 
-            for order in orders_to_check:
+            for detached_order in orders_to_check:
                 with Session(engine) as sess:
+                    order: Optional[Order] = sess.get(Order, detached_order.id)  # Reload fresh
+                    if order is None:
+                        continue
 
                     uuid = order.extra_data.get("cdek_uuid")
                     if not uuid:
@@ -3506,14 +3525,15 @@ async def check_all_shipped_orders():
                     if not new_track and not new_status:
                         continue
 
-
                 # === 1. Присылаем ТРЕК-НОМЕР (один раз!) ===
-                    if new_track and (not order.track or order.track.startswith("BOX")):
-                        old_track = order.track
-                        order.track = new_track
-                    sess.commit()
+                if new_track and (not order.track or order.track.startswith("BOX")):
+                    with Session(engine) as sess:  # New sess for write
+                        order = sess.get(Order, detached_order.id)  # Reload again for safety
+                        if order:
+                            order.track = new_track
+                            sess.commit()
 
-                    # Красивое финальное сообщение клиенту — ТОЛЬКО ОДИН РАЗ!
+                    # Красивое финальное сообщение клиенту
                     await bot.send_message(
                         order.user_id,
                         "Готово! Посылка отправлена! 🚀\n\n"
@@ -3526,11 +3546,11 @@ async def check_all_shipped_orders():
                     )
                     logger.info(f"Трек-номер отправлен клиенту по заказу #{order.id}: {new_track}")
 
-                    # Админу тоже радостная новость
                     await notify_admin(
                         f"Трек-номер пришёл!\n"
                         f"Заказ #{order.id} → <code>{new_track}</code>\n"
                     )
+
 
                 # === 2. Уведомления об изменении статуса (опционально, только важные) ===
                 important_statuses = [
