@@ -1314,7 +1314,7 @@ async def cb_practices_list(cb: CallbackQuery):
                 logger.info(f"[PRACTICES_LIST] У пользователя нет практик")
                 await edit_or_send(
                     cb.message,
-                    "У вас пока нет практик.\nАктивируйте код или закажите коробочку!",
+                    "У вас пока нет практик.\nАктивируйте код или закажите коробочку!\nЕсли вы получили коробочку в подарок, просто активируйте код в личном кабинете",
                     kb_empty_practices()
                 )
                 await cb.answer()
@@ -2241,8 +2241,7 @@ async def cb_pvz_select(cb: CallbackQuery):
     await edit_or_send(
         cb.message,
         f"<b>ПВЗ сохранён!</b>\n\n"
-        f"{full_address}\n"
-        f"Режим работы: {work_time}\n\n"
+        f"{full_address}\n\n"  # Убрал work_time
         f"Доставка: <b>{delivery_cost} ₽</b>\n"
         f"Срок: <b>≈ {period_text} дн.</b>\n\n"
         f"<b>Итого: {total} ₽</b>"
@@ -3009,32 +3008,33 @@ def _shorten_address(address: str) -> str:
     if not address:
         return "ПВЗ СДЭК"
 
-    # Разбиваем по запятой
-    parts = [p.strip() for p in address.split(',')]
+    parts = [p.strip() for p in address.split(',') if p.strip()]
 
-    # Берём последние 1–2 значимых части
-    if len(parts) >= 3:
-        # Улица + дом
-        street_house = ', '.join(parts[-2:])
-    else:
-        street_house = address
+    if len(parts) < 2:
+        short = ' '.join(parts)
+        return short[:42] + '…' if len(short) > 42 else short
 
-    # Убираем всё после номера дома (корп, стр, к, литеру и т.п.)
-    # Оставляем только улицу и основной номер дома
-    street_house = re.sub(r'\s*[ккстркорп./лит]+.*$', '', street_house).strip()
+    # Улица = предпоследняя часть, дом = последняя
+    street = parts[-2]
+    house = parts[-1]
 
-    # Убираем очевидный мусор в начале/конце
-    street_house = re.sub(r'^(Россия|Москва|г\.|обл\.|край|Республика)\s*[,;]?\s*', '', street_house, flags=re.I)
-    street_house = re.sub(r'\s*(Россия|Москва|г\.|обл\.|край|Республика)$', '', street_house, flags=re.I)
+    # Убираем тип улицы в начале street (сохраняем дефисы/порядковые как "2-й Песчаный")
+    street = re.sub(
+        r'^(ул\.?|улица|пр\.?|проспект|пр-кт|пр-т|б-р|бульвар|пер\.?|переулок|ш\.?|шоссе|наб\.?|набережная|пл\.?|площадь|тракт|аллея)\s+',
+        '', street, flags=re.I)
+
+    # Для house: убираем после основной цифры (к, стр, корп, но оставляем /1 или 5а)
+    house = re.sub(r'\s+[ккстркорп]\.?\s*\d+.*$', '', house, flags=re.I)
+
+    short = f"{street.strip()}, {house.strip()}"
 
     # Нормализация пробелов
-    street_house = re.sub(r'\s+', ' ', street_house).strip()
+    short = re.sub(r'\s+', ' ', short).strip()
 
-    # Если слишком длинно — обрезаем красиво
-    if len(street_house) > 42:
-        street_house = street_house[:39] + "…"
+    if len(short) > 42:
+        short = short[:39] + '…'
 
-    return street_house or "ПВЗ СДЭК"
+    return short or "ПВЗ СДЭК"
 
 
 def _extract_street_house(addr: str) -> tuple[Optional[str], Optional[str]]:
