@@ -67,10 +67,11 @@ def get_all_orders_by_status(status: str) -> list[Order]:
 # ==============DATA=============
 STREET_KEYWORDS = [
     "ул", "ул.", "улица",
+    "проезд", "пр-д", "пр-зд", "пр-д.", "пр-зд.",
     "проспект", "просп.", "пр.", "пр-т", "пр-кт",
     "пер.", "переулок",
     "шоссе",
-    "бульвар", "бул.",
+    "бульвар", "бул.", "б-р.", "бульв.",
     "пл.", "площадь",
     "наб.", "набережная",
     "тракт",
@@ -1605,7 +1606,7 @@ async def cb_change_contact(cb: CallbackQuery):
             sess.add(user)
             sess.commit()
             await cb.message.answer(
-                "Введите адрес или код ПВЗ (например: «Москва, ул. Барклая, 15» или «MSK126»):",
+                "Введите адрес или код ПВЗ (строго в формате «Москва, ул. Барклая, 15» или «MSK126»):",
                 reply_markup=create_inline_keyboard([[
                     {"text": "Назад", "callback_data": back_callback}
                 ]])
@@ -1885,7 +1886,7 @@ async def cb_change_addr(cb: CallbackQuery):
             sess.commit()
 
         await cb.message.answer(
-            "Введите новый адрес ПВЗ (например: «Профсоюзная, 93»):",
+            "Введите новый адрес ПВЗ (Строго в формате «Екатеринбург, Профсоюзная, 93»):",
             reply_markup=create_inline_keyboard([
                 [{"text": "Статус заказа", "callback_data": f"order:{oid}"}]
             ])
@@ -2101,7 +2102,7 @@ async def cb_pvz_reenter(cb: CallbackQuery):
         sess.commit()
 
     await cb.message.edit_text(
-        "Введите адрес ПВЗ ещё раз (например: Москва, пр. 6-й Рощинский, 1с4):",
+        "Введите адрес ПВЗ ещё раз (Строга в формате: Москва, пр. 6-й Рощинский, 1с4):",
         reply_markup=create_inline_keyboard([
             [{"text": "Отмена", "callback_data": CallbackData.MENU.value}]
         ])
@@ -3010,25 +3011,42 @@ def _shorten_address(address: str) -> str:
 
     parts = [p.strip() for p in address.split(',') if p.strip()]
 
-    if len(parts) < 2:
-        short = ' '.join(parts)
-        return short[:42] + '…' if len(short) > 42 else short
+    # Найти индекс части с типом улицы (search anywhere in part)
+    street_idx = -1
+    for i, part in enumerate(parts):
+        lower_part = part.lower()
+        if any(re.search(r'(^|\b)' + re.escape(kw) + r'(\b|\.?$)', lower_part, re.I) for kw in STREET_KEYWORDS):
+            street_idx = i
+            break
 
-    # Улица = предпоследняя часть, дом = последняя
-    street = parts[-2]
-    house = parts[-1]
+    if street_idx == -1:
+        # Fallback: последние 2-3 части как street + house
+        if len(parts) >= 3:
+            street = parts[-3]
+            house = ', '.join(parts[-2:])
+        elif len(parts) == 2:
+            street = parts[0]
+            house = parts[1]
+        else:
+            street = ' '.join(parts)
+            house = ''
+    else:
+        # Street = найденная часть, house = всё после
+        street = parts[street_idx]
+        house_parts = parts[street_idx + 1:]
+        house = ', '.join(house_parts).strip() if house_parts else ''
 
-    # Убираем тип улицы в начале street (сохраняем дефисы/порядковые как "2-й Песчаный")
+    # Очистка street: убрать тип только если в начале (сохраняя "2-й Проезд")
     street = re.sub(
-        r'^(ул\.?|улица|пр\.?|проспект|пр-кт|пр-т|б-р|бульвар|пер\.?|переулок|ш\.?|шоссе|наб\.?|набережная|пл\.?|площадь|тракт|аллея)\s+',
-        '', street, flags=re.I)
+        r'^(ул\.?|улица|пр\.?|проспект|пр-кт|пр-т|пр-д|проезд|б-р|бульвар|пер\.?|переулок|ш\.?|шоссе|наб\.?|набережная|пл\.?|площадь|тракт|аллея)\s+',
+        '', street, flags=re.I).strip()
 
-    # Для house: убираем после основной цифры (к, стр, корп, но оставляем /1 или 5а)
-    house = re.sub(r'\s+[ккстркорп]\.?\s*\d+.*$', '', house, flags=re.I)
+    # Для house: убрать "эт., оф., пом., цоколь, подвал" и после
+    if house:
+        house = re.sub(r'\s+(эт\.?|оф\.?|пом\.?|цоколь|подвал).*', '', house, flags=re.I).strip()
 
-    short = f"{street.strip()}, {house.strip()}"
+    short = f"{street}, {house}" if house else street
 
-    # Нормализация пробелов
     short = re.sub(r'\s+', ' ', short).strip()
 
     if len(short) > 42:
@@ -3225,12 +3243,18 @@ def _make_exact_matcher(address_query: str):
         # Проверка дома
         house_ok = False
         if house_raw:
-            # Цифры дома
-            house_digits = re.sub(r'[^\d]', '', house_raw)
-            if house_digits:
-                addr_digits = re.sub(r'[^\d]', '', addr_full)
-                if house_digits in addr_digits:
-                    house_ok = True
+            house_lower = house_raw.lower()
+            addr_lower = addr_full.lower()
+
+            # Базовое: полное совпадение подстроки
+            if house_lower in addr_lower:
+                house_ok = True
+            else:
+                # Для форм "44к2", "7/1", "5а" — ищем как word (границы)
+                if re.match(r'\d+[а-яa-z/.-]*$', house_lower):
+                    escaped = re.escape(house_lower)
+                    if re.search(r'(?<![\w/.-])' + escaped + r'(?![\w/.-])', addr_lower):
+                        house_ok = True
 
             # Проверка с корпусами, строениями, литерами и т.д.
             if not house_ok:
@@ -3238,9 +3262,8 @@ def _make_exact_matcher(address_query: str):
                 house_parts = re.split(r'[\s,]+', house_raw)
                 house_ok = any(part in addr_full for part in house_parts if len(part) >= 2)
 
-        # Если улицы почти нет — полагаемся только на дом
-        if len(street_key) < 4 and house_ok:
-            return True
+        if not street_key:
+            return house_ok
 
         return street_ok and (house_ok or not house_raw)
 
@@ -3341,6 +3364,14 @@ async def find_best_pvz(address_query: str, city: str = None, limit: int = 12) -
     # ───────────────────────────────────────────────
     matcher = _make_exact_matcher(original_query)
     filtered = [p for p in pts if matcher(p)]
+    if not filtered:
+        words = re.findall(r'\w+', original_query.lower())
+        is_pure_city = (len(words) <= 2 and not any(re.match(r'\d', w) for w in words) and
+                        city_code is not None and len(pts) > 0)
+        if is_pure_city:
+            logger.info(f"Чистый запрос на город '{original_query}' — возвращаем первые {limit} ПВЗ, отсортированные по code")
+            sorted_pts = sorted(pts, key=lambda p: str(p.get('code', '')))
+            filtered = sorted_pts[:limit]
 
     # ───────────────────────────────────────────────
     # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ — поведение при неудаче
@@ -3393,7 +3424,7 @@ def format_pvz_button(pvz: dict, index: int) -> dict:
     dist = pvz.get("distance")
     dist_text = f" · {int(dist)}м" if isinstance(dist, (int, float)) and 100 < dist < 5000 else ""
 
-    text = f"{index + 1}. {short_addr}{dist_text}"
+    text = f"{index + 1}. {short_addr.strip()}{dist_text}"
 
     # Обрезаем только если всё равно длиннее лимита Telegram
     if len(text) > 64:
@@ -3408,7 +3439,7 @@ def format_pvz_button(pvz: dict, index: int) -> dict:
 def kb_pvz_list(pvz_list: List[dict]) -> InlineKeyboardMarkup:
     buttons = []
 
-    for i, pvz in enumerate(pvz_list[:10]):
+    for i, pvz in enumerate(pvz_list[:12]):
         buttons.append([format_pvz_button(pvz, i)])
 
     buttons.append([{"text": "Не вижу свой ПВЗ", "callback_data": "pvz_manual"}])
