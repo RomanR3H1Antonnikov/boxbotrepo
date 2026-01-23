@@ -927,17 +927,24 @@ def kb_ready_message(order: Order) -> InlineKeyboardMarkup:
 def kb_order_status(order: Order) -> InlineKeyboardMarkup:
     buttons = []
 
-    # Кнопка отслеживания (всегда, если есть трек)
+    # Кнопка отслеживания — всегда, если есть трек
     if order.track:
         buttons.append([{
             "text": "Отследить посылку",
             "url": f"https://www.cdek.ru/ru/tracking?order_id={order.track}"
         }])
 
-    # Если заказ READY — показываем оплату остатка
-    if order.status == OrderStatus.ASSEMBLED.value:
+    # Кнопка дооплаты — ТОЛЬКО если заказ собран И это предоплата
+    if (order.status == OrderStatus.ASSEMBLED.value and
+        order.payment_kind == "pre"):
         buttons.append([{"text": "Оплатить остаток", "callback_data": f"pay:rem:{order.id}"}])
 
+    # Кнопка изменения адреса — ТОЛЬКО если заказ ещё НЕ отправлен
+    if order.status in (OrderStatus.NEW.value, OrderStatus.PAID_PARTIALLY.value,
+                        OrderStatus.PAID_FULL.value, OrderStatus.ASSEMBLED.value):
+        buttons.append([{"text": "Изменить адрес доставки", "callback_data": f"change_addr:{order.id}"}])
+
+    # Информация о заказе и назад — всегда
     buttons.append([{"text": "Информация о заказе", "callback_data": f"order:{order.id}"}])
     buttons.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
 
@@ -1055,7 +1062,7 @@ def format_client_order_info(order: Order) -> str:
         f"📍 <b>Адрес ПВЗ:</b>\n{order.address}",
     ]
 
-    # FIX: всегда показываем послание (даже если его нет)
+    # Послание
     gift = (order.extra_data or {}).get("gift_message")
     lines += [
         "",
@@ -1064,7 +1071,7 @@ def format_client_order_info(order: Order) -> str:
     ]
 
     # Оплата — подробнее
-    total = order.total_price
+    total = order.total_price // 100  # предполагаем, что total_price теперь в рублях (не копейках)
     prepay_amount = (total * Config.PREPAY_PERCENT + 99) // 100
     remainder = total - prepay_amount
 
@@ -1073,8 +1080,8 @@ def format_client_order_info(order: Order) -> str:
     if order.status == OrderStatus.NEW.value:
         lines += [
             f"К оплате: <b>{total} ₽</b>",
-            f"   • Вариант: предоплата {Config.PREPAY_PERCENT}% ({prepay_amount} ₽)",
-            f"   • Вариант: полная оплата ({total} ₽)",
+            f"   • Предоплата {Config.PREPAY_PERCENT}% ({prepay_amount} ₽)",
+            f"   • Полная оплата ({total} ₽)",
         ]
     elif order.status == OrderStatus.PAID_PARTIALLY.value:
         lines += [
@@ -1082,10 +1089,13 @@ def format_client_order_info(order: Order) -> str:
             f"🔄 Остаток к оплате: <b>{remainder} ₽</b>",
         ]
     elif order.status == OrderStatus.ASSEMBLED.value:
-        lines += [
-            f"✅ Предоплата: {prepay_amount} ₽",
-            f"Ожидаем дооплату: <b>{remainder} ₽</b>",
-        ]
+        if order.payment_kind == "pre":
+            lines += [
+                f"✅ Предоплата: {prepay_amount} ₽",
+                f"Ожидаем дооплату: <b>{remainder} ₽</b>",
+            ]
+        else:
+            lines += [f"✅ Полностью оплачено: {total} ₽"]
     elif order.status in [OrderStatus.PAID_FULL.value, OrderStatus.SHIPPED.value, OrderStatus.ARCHIVED.value]:
         lines += [f"✅ Полностью оплачено: {total} ₽"]
     else:
@@ -2843,7 +2853,7 @@ async def on_message_router(message: Message):
             user.temp_order_id_for_track = None
             sess.commit()
 
-            await notify_client_order_shipped(order.id, cb.message)
+            await notify_client_order_shipped(order.id, message)
             await message.answer(f"Трек {track} сохранён для #{order.id}. Заказ отправлен!", reply_markup=kb_admin_panel())
             return
 
@@ -3060,7 +3070,7 @@ async def handle_admin_command(message: Message, text: str):
                 order.track = track
                 sess.commit()
 
-            await notify_client_order_shipped(order.id, cb.message)
+            await notify_client_order_shipped(order.id, message)
             await message.answer(f"📦 Заказ #{order_id} отправлен! Трек: {track}")
 
         elif action == "archived":
