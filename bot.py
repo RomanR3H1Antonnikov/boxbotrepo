@@ -19,6 +19,8 @@ from db.repo import (
 )
 from db.models import RedeemCode, RedeemUse
 from db.models import Order
+from yookassa import Configuration, Payment
+from yookassa.domain.notification import WebhookNotification
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -30,6 +32,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
+
 
 # ========== CONFIG ==========
 USE_WEBHOOK = False
@@ -96,6 +99,14 @@ prod_account = os.getenv("CDEK_PROD_ACCOUNT") or ""
 prod_password = os.getenv("CDEK_PROD_PASSWORD") or ""
 logger.info(f"CDEK_PROD_ACCOUNT загружен: {'Да (непустой)' if prod_account.strip() else 'НЕТ или пустой'} | Длина: {len(prod_account)}")
 logger.info(f"CDEK_PROD_PASSWORD загружен: {'Да (непустой)' if prod_password.strip() else 'НЕТ или пустой'} | Длина: {len(prod_password)}")
+Configuration.account_id = os.getenv("YOOKASSA_SHOP_ID")
+Configuration.secret_key = os.getenv("YOOKASSA_SECRET_KEY")
+
+# Проверяем, что ключи загрузились
+if not Configuration.account_id or not Configuration.secret_key:
+    logger.critical("!!! ЮKassa ключи НЕ ЗАГРУЗИЛИСЬ !!! Проверь .env")
+else:
+    logger.info(f"ЮKassa подключена: shopId = {Configuration.account_id[:6]}...")
 
 # ========== CDEK: Получение токена ==========
 async def get_cdek_token() -> Optional[str]:
@@ -389,6 +400,39 @@ dp.include_router(r)
 CODE_RE = re.compile(r"^\d{3}$")
 
 
+async def create_yookassa_payment(order: Order, amount_rub: int, description: str, return_url: str) -> dict:
+    lock = get_payment_lock(order.id)  # Получаем lock для заказа
+    async with lock:  # Блокируем на время создания
+        try:
+            payment = Payment.create({
+                "amount": {
+                    "value": f"{amount_rub}.00",
+                    "currency": "RUB"
+                },
+                "confirmation": {
+                    "type": "redirect",
+                    "return_url": return_url
+                },
+                "capture": True,
+                "description": description,
+                "metadata": {
+                    "order_id": str(order.id),
+                    "user_id": str(order.user_id),
+                    "payment_kind": order.payment_kind or "unknown"
+                }
+            })
+            logger.info(f"Создан платёж ЮKassa #{payment.id} для заказа #{order.id} на {amount_rub}₽")
+            return {
+                "payment_id": payment.id,
+                "confirmation_url": payment.confirmation.confirmation_url,
+                "status": payment.status
+            }
+        except Exception as e:
+            logger.exception(f"Ошибка создания платежа ЮKassa для заказа #{order.id}")
+            await notify_admin(f"❌ Ошибка ЮKassa при создании платежа для заказа #{order.id}\n{e}")
+            return None
+
+
 async def create_cdek_order(order_id: int) -> bool:
     token = await get_cdek_token()
     if not token:
@@ -517,23 +561,17 @@ async def create_cdek_order(order_id: int) -> bool:
         return False
 
     # ================== 4. СОХРАНЯЕМ UUID В БД ==================
-    # FIX: New session for write
-    with Session(engine) as sess:
-        order = sess.get(Order, order_id)
+    with Session(engine) as sess:  # Новая сессия для записи
+        order = sess.get(Order, order_id)  # Перезагружаем свежий объект
         if not order:
             return False
-
-        # Refresh/attach
-        sess.refresh(order)
-
         if order.extra_data is None:
             order.extra_data = {}
-
         order.extra_data["cdek_uuid"] = uuid
-        flag_modified(order, "extra_data")  # FIX: Mark modified
+        flag_modified(order, "extra_data")  # Маркируем как изменённый
         order.track = uuid
         order.status = OrderStatus.SHIPPED.value
-        sess.commit()
+        sess.commit()  # Коммитим в этой сессии
 
     logger.info(f"СДЭК: ЗАКАЗ #{order_id} ПРИНЯТ | UUID: {uuid}")
 
@@ -549,9 +587,9 @@ async def create_cdek_order(order_id: int) -> bool:
 
 def validate_data(full_name: str, phone: str, email: str) -> tuple[bool, str]:
     if not full_name or not full_name.strip():
-        return False, "Отсутствует ФИО."
+        return False, "Отсутствуют имя и фамилия."
     if not re.match(r"^[А-ЯЁ][а-яё]+(\s+[А-ЯЁ][а-яё]+)+$", full_name.strip()):
-        return False, "ФИО: Имя и Фамилия с заглавной буквы, без отчества и лишних пробелов."
+        return False, "Имя и Фамилия с заглавной буквы, без отчества и лишних пробелов."
     if not phone or not phone.strip():
         return False, "Отсутствует телефон."
     phone = phone.strip().replace(" ", "").replace("-", "")
@@ -571,30 +609,27 @@ def validate_address(address: str) -> tuple[bool, str]:
 
 
 def reset_states(user):
-    # НЕ сбрасываем флаг ввода кода — он должен жить, пока пользователь не введёт код или не отменит явно
-    if not user.awaiting_redeem_code:
-        user.awaiting_auth = False
-        user.awaiting_gift_message = False
-        user.awaiting_pvz_address = False
-        user.awaiting_manual_pvz = False
-        user.awaiting_manual_track = False
-        user.pvz_for_order_id = None
-        user.temp_gift_order_id = None
-        user.temp_pvz_list = None
-        user.temp_selected_pvz = None
-        user.temp_order_id_for_track = None
-
-        # Abandon unfinished NEW orders
-        engine = make_engine(Config.DB_PATH)
-        with Session(engine) as sess:
-            orders = get_user_orders_db(sess, user.telegram_id)
-            for o in orders:
-                if o.status == OrderStatus.NEW.value:
-                    o = sess.merge(o)
-                    o.status = OrderStatus.ABANDONED.value
-            sess.commit()
-    else:
-        logger.info(f"reset_states пропущен для пользователя {user.telegram_id} — идёт ввод кода")
+    # Сбрасываем ВСЕ awaiting флаги — без исключений, чтобы избежать зависаний
+    user.awaiting_redeem_code = False
+    user.awaiting_auth = False
+    user.awaiting_gift_message = False
+    user.awaiting_pvz_address = False
+    user.awaiting_manual_pvz = False
+    user.awaiting_manual_track = False
+    user.pvz_for_order_id = None
+    user.temp_gift_order_id = None
+    user.temp_pvz_list = None
+    user.temp_selected_pvz = None
+    user.temp_order_id_for_track = None
+    # Abandon unfinished NEW orders
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        orders = get_user_orders_db(sess, user.telegram_id)
+        for o in orders:
+            if o.status == OrderStatus.NEW.value:
+                o = sess.merge(o)
+                o.status = OrderStatus.ABANDONED.value
+        sess.commit()
 
 
 # ======== ADMIN HELPERS ========
@@ -920,7 +955,6 @@ def kb_review(order: Optional[Order]) -> InlineKeyboardMarkup:
 def kb_ready_message(order: Order) -> InlineKeyboardMarkup:
     return create_inline_keyboard([
         [{"text": "Оплатить остаток", "callback_data": f"pay:rem:{order.id}"}],
-        [{"text": "Изменить адрес доставки", "callback_data": f"change_addr:{order.id}"}],
         [{"text": "Статус заказа", "callback_data": f"order:{order.id}"}],
     ])
 
@@ -937,11 +971,11 @@ def kb_order_status(order: Order) -> InlineKeyboardMarkup:
 
     # Дооплата — только если предоплата и собран
     if order.status == OrderStatus.ASSEMBLED.value and order.payment_kind == "pre":
-        buttons.append([{"text": "Оплатить остаток", "callback_data": f"pay:rem:{order.id}"}])
-
-    # Изменить адрес — ТОЛЬКО если заказ ещё НЕ оплачен (NEW)
-    if order.status == OrderStatus.NEW.value:
-        buttons.append([{"text": "Изменить адрес доставки", "callback_data": f"change_addr:{order.id}"}])
+        remainder_rub = (order.total_price_kop // 100) - (order.total_price_kop * Config.PREPAY_PERCENT // 10000)
+        buttons.append([{
+            "text": f"Оплатить остаток ({remainder_rub} ₽)",
+            "callback_data": f"pay:rem:{order.id}"
+        }])
 
     buttons.append([{"text": "Информация о заказе", "callback_data": f"order:{order.id}"}])
     buttons.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
@@ -1428,6 +1462,10 @@ async def cb_single_practice(cb: CallbackQuery):
 
             idx = int(idx_str)
             logger.info(f"[PRACTICE_SINGLE] Запрошена практика №{idx} | action={action}")
+            if not (0 <= idx < len(user.practices)):
+                logger.warning(f"Неверный idx практики: {idx} для user {user.telegram_id}")
+                await cb.answer("Практика не найдена", show_alert=True)
+                return
 
             if not (user.is_authorized and 0 <= idx < len(user.practices)):
                 logger.warning(
@@ -1610,7 +1648,7 @@ async def cb_checkout_start(cb: CallbackQuery):
 
         if user.is_authorized:
             await cb.message.answer(
-                f"Проверьте данные:\n• ФИО: {user.full_name}\n• Телефон: {user.phone}\n• Email: {user.email}\n\nХотите изменить?",
+                f"Проверьте данные:\n• Имя и фамилия: {user.full_name}\n• Телефон: {user.phone}\n• Email: {user.email}\n\nХотите изменить?",
                 reply_markup=kb_change_contact(CallbackData.MENU.value)
             )
         else:
@@ -1720,115 +1758,31 @@ async def show_review(msg: Message, order: Order):
 # ========== PAYMENT ==========
 @r.callback_query(F.data.startswith("pay:"))
 async def cb_pay(cb: CallbackQuery):
-    parts = (cb.data or "").split(":")
+    parts = cb.data.split(":")
     if len(parts) != 3:
-        await cb.answer("Ошибка оплаты", show_alert=True)
+        await cb.answer("Ошибка", show_alert=True)
         return
 
-    kind = parts[1]  # full | pre | rem
+    kind = parts[1]
     try:
-        oid = int(parts[2])
-    except ValueError:
-        await cb.answer("Ошибка заказа", show_alert=True)
+        order_id = int(parts[2])
+    except:
+        await cb.answer("Неверный ID заказа", show_alert=True)
         return
 
-    lock = get_payment_lock(oid)
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        order = sess.get(Order, order_id)
+        if not order or order.user_id != cb.from_user.id:
+            await cb.answer("Заказ не найден", show_alert=True)
+            return
 
-    if lock.locked():
-        await cb.answer("Оплата уже обрабатывается, подождите…", show_alert=True)
-        return
+        if order.status not in (OrderStatus.NEW.value, OrderStatus.PAID_PARTIALLY.value):
+            await cb.answer("Оплата уже завершена или невозможна", show_alert=True)
+            return
 
-    async with lock:
-        try:
-            engine = make_engine(Config.DB_PATH)
-            need_cdek_create = False  # Никогда не создаём CDEK автоматически!
-
-            with Session(engine) as sess:
-                order = sess.get(Order, oid)
-
-                if not order or order.user_id != cb.from_user.id:
-                    await cb.answer("Заказ не найден", show_alert=True)
-                    return
-
-                if order.status in (
-                        OrderStatus.PAID_FULL.value,
-                        OrderStatus.SHIPPED.value,
-                        OrderStatus.ARCHIVED.value
-                ):
-                    await cb.answer("Этот заказ уже оплачен", show_alert=True)
-                    return
-
-                # Гарантия цены (если не установлена)
-                if order.total_price_kop == 0:
-                    delivery_cost = (order.extra_data or {}).get("delivery_cost", 590)
-                    total = Config.PRICE_RUB + delivery_cost
-                    prepay = (total * Config.PREPAY_PERCENT + 99) // 100
-                    order.prepay_amount = prepay * 100
-                    order.remainder_amount = (total - prepay) * 100
-
-                if kind == "full":
-                    if order.status != OrderStatus.NEW.value:
-                        await cb.answer("Нельзя оплатить этот заказ", show_alert=True)
-                        return
-                    order.payment_kind = "full"
-                    order.status = OrderStatus.PAID_FULL.value  # Ждёт сборки
-
-                elif kind == "pre":
-                    if order.status != OrderStatus.NEW.value:
-                        await cb.answer("Предоплата уже внесена", show_alert=True)
-                        return
-                    order.payment_kind = "pre"
-                    order.status = OrderStatus.PAID_PARTIALLY.value  # Ждёт сборки
-
-                elif kind == "rem":
-                    if order.status != OrderStatus.ASSEMBLED.value or order.payment_kind != "pre":
-                        await cb.answer("Заказ не готов к дооплате", show_alert=True)
-                        return
-                    order.payment_kind = "remainder"  # Или "full" после
-                    order.status = OrderStatus.PAID_FULL.value  # Теперь ждёт отправки (после сборки уже)
-
-                else:
-                    await cb.answer("Ошибка типа оплаты", show_alert=True)
-                    return
-
-                sess.commit()
-
-                # Уведомления (fresh order после commit не нужен, используем id)
-                if kind == "full":
-                    await notify_admins_payment_success(order.id)
-                    await cb.message.answer(
-                        "Полная оплата получена! ❤️\n\n"
-                        f"Заказ <b>#{order.id}</b> принят в сборку.",
-                        reply_markup=kb_order_status(order)
-                    )
-
-                elif kind == "pre":
-                    await notify_admins_payment_success(order.id)
-                    await cb.message.answer(
-                        "Предоплата получена ❤️\n\n"
-                        f"Заказ <b>#{order.id}</b> принят в сборку.",
-                        reply_markup=kb_order_status(order)
-                    )
-
-                elif kind == "rem":
-                    await notify_admins_payment_remainder(order.id)
-                    await cb.message.answer(
-                        "Дооплата получена ❤️\n\n"
-                        f"Заказ <b>#{order.id}</b> готов к отправке.",
-                        reply_markup=kb_order_status(order)
-                    )
-
-            with Session(engine) as sess:
-                user = get_user_by_id(sess, cb.from_user.id)
-                if user:
-                    reset_states(user)
-                sess.commit()
-            await cb.answer()
-
-        except Exception as e:
-            logger.exception("Ошибка оплаты")
-            await notify_admin(f"❌ Ошибка оплаты #{oid}\n{e}")
-            await cb.answer("Ошибка при оплате", show_alert=True)
+    await send_payment_keyboard(cb.message, order)
+    await cb.answer()
 
 
 # ========== ORDER STATUS ==========
@@ -2437,21 +2391,53 @@ async def cb_gift_no(cb: CallbackQuery):
     await cb.answer()
 
 
-async def send_payment_keyboard(msg: Message, order):
-    total = order.total_price_kop // 100
-    prepay = (total * Config.PREPAY_PERCENT + 99) // 100
+async def send_payment_keyboard(msg: Message, order: Order):
+    total_rub = order.total_price_kop // 100
+    prepay_rub = (total_rub * Config.PREPAY_PERCENT + 99) // 100
+    remainder_rub = total_rub - prepay_rub
 
-    await msg.answer(
-        f"<b>Оплата заказа #{order.id}</b>\n\n"
-        f"Итого: <b>{total} ₽</b>\n"
-        f"• Предоплата 30% = {prepay} ₽\n"
-        f"• Остаток = {total - prepay} ₽",
-        reply_markup=create_inline_keyboard([
-            [{"text": f"Оплатить 100% ({total} ₽)", "callback_data": f"pay:full:{order.id}"}],
-            [{"text": f"Предоплата 30% ({prepay} ₽)", "callback_data": f"pay:pre:{order.id}"}],
-            [{"text": "В меню", "callback_data": CallbackData.MENU.value}],
-        ])
+    base_return_url = f"https://t.me/{(await bot.get_me()).username}?start=payment_success"
+
+    # Полная оплата
+    full_payment = await create_yookassa_payment(
+        order=order,
+        amount_rub=total_rub,
+        description=f"Полная оплата заказа #{order.id} — Коробочка «Отпусти тревогу»",
+        return_url=f"{base_return_url}&order_id={order.id}&kind=full"
     )
+
+    # Предоплата 30%
+    pre_payment = await create_yookassa_payment(
+        order=order,
+        amount_rub=prepay_rub,
+        description=f"Предоплата 30% заказа #{order.id} — Коробочка «Отпусти тревогу»",
+        return_url=f"{base_return_url}&order_id={order.id}&kind=pre"
+    )
+
+    buttons = []
+    if full_payment and full_payment["confirmation_url"]:
+        buttons.append([{
+            "text": f"Оплатить 100% ({total_rub} ₽)",
+            "url": full_payment["confirmation_url"]
+        }])
+
+    if pre_payment and pre_payment["confirmation_url"]:
+        buttons.append([{
+            "text": f"Предоплата 30% ({prepay_rub} ₽)",
+            "url": pre_payment["confirmation_url"]
+        }])
+
+    buttons.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
+
+    text = (
+        f"<b>Оплата заказа #{order.id}</b>\n\n"
+        f"Итого: <b>{total_rub} ₽</b>\n"
+        f"• Предоплата 30% = {prepay_rub} ₽\n"
+        f"• Остаток = {remainder_rub} ₽\n\n"
+        f"После оплаты нажмите кнопку ниже или вернитесь в бот — статус обновится автоматически."
+    )
+
+    await msg.answer(text, reply_markup=create_inline_keyboard(buttons))
 
 
 @r.callback_query(F.data == "gift:cancel")
@@ -3709,6 +3695,87 @@ async def check_channel_permissions():
             await notify_admin("⚠️ Критично: бот не админ в закрытом канале!")
     except Exception as e:
         logger.error(f"Не удалось проверить права бота в канале: {e}")
+
+@r.message(CommandStart(deep_link=True))
+async def handle_payment_success(message: Message):
+    args = message.text.split(maxsplit=1)[1:] if len(message.text.split()) > 1 else []
+    if not args or not args[0].startswith("payment_success"):
+        await on_start(message)  # обычный старт
+        return
+
+    # Парсим параметры
+    params_str = " ".join(args[1:]) if len(args) > 1 else ""
+    params = dict(p.split('=', 1) for p in params_str.split('&') if '=' in p)
+
+    order_id_str = params.get("order_id")
+    kind = params.get("kind")
+
+    if not order_id_str or not order_id_str.isdigit():
+        await message.answer("Ошибка: некорректная ссылка после оплаты. Напишите в поддержку.")
+        return
+
+    order_id = int(order_id_str)
+
+    engine = make_engine(Config.DB_PATH)
+    with Session(engine) as sess:
+        order = sess.get(Order, order_id)
+        if not order or order.user_id != message.from_user.id:
+            await message.answer("Заказ не найден или принадлежит другому пользователю.")
+            return
+
+        # Проверяем, не оплачен ли уже
+        if order.status in (OrderStatus.PAID_FULL.value, OrderStatus.SHIPPED.value, OrderStatus.ARCHIVED.value):
+            await message.answer("Заказ уже оплачен и обрабатывается ❤️")
+            await message.answer(format_client_order_info(order), reply_markup=kb_order_status(order))
+            return
+
+        # Критично: проверяем реальный статус платежа в ЮKассе
+        try:
+            payment = Payment.find_one(order.extra_data.get("yookassa_payment_id"))
+            if payment.status != "succeeded":
+                await message.answer(
+                    "Платёж ещё не подтверждён ЮKассой.\n"
+                    "Пожалуйста, подождите 1–2 минуты и вернитесь по этой же ссылке снова.\n"
+                    "Если проблема сохраняется — напишите в поддержку."
+                )
+                return
+
+            # Платёж успешен — обновляем заказ
+            if kind == "full":
+                order.payment_kind = "full"
+                order.status = OrderStatus.PAID_FULL.value
+                await notify_admins_payment_success(order.id)
+                text = f"Полная оплата получена! ❤️\nЗаказ <b>#{order.id}</b> принят в сборку."
+
+            elif kind == "pre":
+                order.payment_kind = "pre"
+                order.status = OrderStatus.PAID_PARTIALLY.value
+                await notify_admins_payment_success(order.id)
+                text = f"Предоплата получена ❤️\nЗаказ <b>#{order.id}</b> принят в сборку."
+
+            elif kind == "rem":
+                order.payment_kind = "remainder"
+                order.status = OrderStatus.PAID_FULL.value
+                await notify_admins_payment_remainder(order.id)
+                text = f"Дооплата получена ❤️\nЗаказ <b>#{order.id}</b> готов к отправке."
+
+            else:
+                text = "Оплата прошла, но тип оплаты неизвестен. Админ уже уведомлён."
+
+            # Сохраняем ID платежа (на будущее)
+            if not order.extra_data:
+                order.extra_data = {}
+            order.extra_data["yookassa_payment_id"] = payment.id
+            flag_modified(order, "extra_data")
+            sess.commit()
+
+        except Exception as e:
+            logger.exception("Ошибка проверки статуса платежа в ЮKассе")
+            await notify_admin(f"Ошибка проверки платежа заказа #{order_id}: {e}")
+            await message.answer("Ошибка проверки оплаты. Админ уже уведомлён, скоро разберёмся.")
+
+    await message.answer(text)
+    await message.answer(format_client_order_info(order), reply_markup=kb_order_status(order))
 
 
 # ========== ENTRYPOINT ==========
