@@ -15,7 +15,7 @@ def seed_data(session: Session, anxiety_codes: list[str] | None = None):
         code="anxiety",
         title="Коробочка «Отпусти тревогу»",
         description="Комплект для снижения тревожности с практиками и физическими предметами.",
-        price_kop=299000  # 2990.00 руб
+        price_kop=599000  # 5990.00 руб
     )
 
     if anxiety_codes:

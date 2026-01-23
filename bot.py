@@ -388,7 +388,7 @@ dp = Dispatcher()
 r = Router()
 dp.include_router(r)
 
-CODE_RE = re.compile(r"^\d{4}$")
+CODE_RE = re.compile(r"^\d{3}$")
 
 
 async def create_cdek_order(order_id: int) -> bool:
@@ -1516,7 +1516,7 @@ async def cb_redeem_start(cb: CallbackQuery):
 
         # Только после успешного сохранения отправляем сообщение
         await cb.message.answer(
-            "Введите <b>код с карточки</b> (4 цифры):",
+            "Введите <b>код с карточки</b> (несколько волшебных цифр):",
             reply_markup=create_inline_keyboard([
                 [{"text": "Отменить", "callback_data": "redeem:cancel"}],
                 [{"text": "Назад в кабинет", "callback_data": CallbackData.CABINET.value}]
@@ -2242,7 +2242,8 @@ async def cb_pvz_select(cb: CallbackQuery):
     await edit_or_send(
         cb.message,
         f"<b>ПВЗ сохранён!</b>\n\n"
-        f"{full_address}\n\n"  # Убрал work_time
+        f"{full_address}\n"
+        f"Время работы пункта: {work_time}\n\n"
         f"Доставка: <b>{delivery_cost} ₽</b>\n"
         f"Срок: <b>≈ {period_text} дн.</b>\n\n"
         f"<b>Итого: {total} ₽</b>"
