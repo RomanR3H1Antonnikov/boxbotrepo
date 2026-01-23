@@ -922,7 +922,7 @@ def kb_order_status(order: Order) -> InlineKeyboardMarkup:
         }])
 
     # Если заказ READY — показываем оплату остатка
-    if order.status == OrderStatus.READY.value:
+    if order.status == OrderStatus.ASSEMBLED.value:
         buttons.append([{"text": "Оплатить остаток", "callback_data": f"pay:rem:{order.id}"}])
 
     buttons.append([{"text": "Информация о заказе", "callback_data": f"order:{order.id}"}])
@@ -1063,17 +1063,17 @@ def format_client_order_info(order: Order) -> str:
             f"   • Вариант: предоплата {Config.PREPAY_PERCENT}% ({prepay_amount} ₽)",
             f"   • Вариант: полная оплата ({total} ₽)",
         ]
-    elif order.status == OrderStatus.PREPAID.value:
+    elif order.status == OrderStatus.PAID_PARTIALLY.value:
         lines += [
             f"✅ Предоплата получена: {prepay_amount} ₽",
             f"🔄 Остаток к оплате: <b>{remainder} ₽</b>",
         ]
-    elif order.status == OrderStatus.READY.value:
+    elif order.status == OrderStatus.ASSEMBLED.value:
         lines += [
             f"✅ Предоплата: {prepay_amount} ₽",
             f"Ожидаем дооплату: <b>{remainder} ₽</b>",
         ]
-    elif order.status in [OrderStatus.PAID.value, OrderStatus.SHIPPED.value, OrderStatus.ARCHIVED.value]:
+    elif order.status in [OrderStatus.PAID_FULL.value, OrderStatus.SHIPPED.value, OrderStatus.ARCHIVED.value]:
         lines += [f"✅ Полностью оплачено: {total} ₽"]
     else:
         lines += [f"Сумма: {total} ₽"]
@@ -2810,7 +2810,7 @@ async def on_message_router(message: Message):
                 return
 
             order = sess.get(Order, order_id)
-            if not order or order.status not in [OrderStatus.READY.value, OrderStatus.PAID.value]:
+            if not order or order.status not in [OrderStatus.ASSEMBLED.value, OrderStatus.PAID_FULL.value]:
                 user.awaiting_manual_track = False
                 sess.commit()
                 await message.answer("Заказ не готов к вводу трека.", reply_markup=kb_admin_panel())
