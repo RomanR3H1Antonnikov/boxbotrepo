@@ -7,6 +7,7 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Optional, Dict, List
 from enum import Enum
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from sqlalchemy.orm.attributes import flag_modified
@@ -16,6 +17,7 @@ from db.repo import (
     get_user_by_id,
     create_order_db, get_user_orders_db
 )
+from db.models import RedeemCode, RedeemUse
 from db.models import Order
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
@@ -290,12 +292,7 @@ class Config:
     PRICE_RUB = 5990
     PREPAY_PERCENT = 30
     ADMIN_HELP_NICK = "@anbolshakowa"
-    CODES_POOL = {
-        "1002", "1347", "2589", "3761", "4923", "5178", "6354", "7490", "8632", "9714",
-        "1286", "2439", "3591", "4725", "5863", "6917", "7048", "8251", "9376", "1432",
-        "2567", "3789", "4910", "5123", "6345", "7578", "8790", "9012", "1234", "3456",
-        "5678", "7890", "1023", "2345", "4567", "6789", "8901", "3210", "5432", "7654"
-    }
+    CODES_POOL = set()
     DEFAULT_PRACTICES = [
         "Дыхательная практика", "Зеркало", "Снять тревогу с тревоги",
         "Внутренний ребенок", "Антихрупкость", "Созидать жизнь", "Спокойный сон",
@@ -2510,15 +2507,26 @@ async def on_message_router(message: Message):
         # САМЫЙ ВЕРХ — проверка активации кода (самый высокий приоритет!)
         # ───────────────────────────────────────────────
         logger.info(f"→ Проверка состояния перед обработкой: awaiting_redeem_code = {user.awaiting_redeem_code}")
-        logger.info(f"Получено сообщение '{text}' от {user.telegram_id}, awaiting_redeem_code = {user.awaiting_redeem_code}")
+        logger.info(
+            f"Получено сообщение '{text}' от {user.telegram_id}, awaiting_redeem_code = {user.awaiting_redeem_code}")
+
         if user.awaiting_redeem_code:
+            # Проверяем, что введено ровно 3 цифры
             if not CODE_RE.match(text):
-                await message.answer("Код должен состоять из 4 цифр. Попробуйте ещё раз.")
+                await message.answer("Код должен состоять из **3 цифр**. Попробуйте ещё раз.")
                 return
 
             code = text.strip()
 
-            if code not in Config.CODES_POOL:
+            # Проверяем код в базе данных
+            from db.models import RedeemCode, RedeemUse
+
+            redeem_code = sess.query(RedeemCode).filter(
+                RedeemCode.code == code,
+                RedeemCode.is_used == False
+            ).first()
+
+            if not redeem_code:
                 await message.answer("❌ Код не найден или уже использован.")
                 user.awaiting_redeem_code = False
                 logger.info(
@@ -2527,8 +2535,18 @@ async def on_message_router(message: Message):
                 await message.answer("Вернитесь в кабинет:", reply_markup=kb_cabinet())
                 return
 
-            # Успешная активация
-            Config.CODES_POOL.remove(code)
+            # Код найден и не использован → активируем
+            redeem_code.is_used = True
+            redeem_code.used_by = user.telegram_id
+            redeem_code.used_at = datetime.now(timezone.utc)
+
+            # Записываем факт использования
+            sess.add(RedeemUse(
+                redeem_code_id=redeem_code.id,
+                user_id=user.telegram_id
+            ))
+
+            # Убираем флаг ожидания
             user.awaiting_redeem_code = False
             logger.info(f"Пользователь {user.telegram_id} успешно активировал код {code}")
 
@@ -2572,7 +2590,7 @@ async def on_message_router(message: Message):
                     f"в канал после активации кода.\nОшибка: {e}"
                 )
 
-            # Формируем сообщение в зависимости от того, были ли практики уже открыты
+            # Формируем сообщение
             if was_already_open:
                 text = (
                     "Этот код уже был активирован ранее (или все практики уже открыты).\n\n"
