@@ -924,31 +924,30 @@ def kb_ready_message(order: Order) -> InlineKeyboardMarkup:
         [{"text": "Статус заказа", "callback_data": f"order:{order.id}"}],
     ])
 
+
 def kb_order_status(order: Order) -> InlineKeyboardMarkup:
     buttons = []
 
-    # Кнопка отслеживания — всегда, если есть трек
+    # Отслеживание
     if order.track:
         buttons.append([{
             "text": "Отследить посылку",
             "url": f"https://www.cdek.ru/ru/tracking?order_id={order.track}"
         }])
 
-    # Кнопка дооплаты — ТОЛЬКО если заказ собран И это предоплата
-    if (order.status == OrderStatus.ASSEMBLED.value and
-        order.payment_kind == "pre"):
+    # Дооплата — только если предоплата и собран
+    if order.status == OrderStatus.ASSEMBLED.value and order.payment_kind == "pre":
         buttons.append([{"text": "Оплатить остаток", "callback_data": f"pay:rem:{order.id}"}])
 
-    # Кнопка изменения адреса — ТОЛЬКО если заказ ещё НЕ отправлен
-    if order.status in (OrderStatus.NEW.value, OrderStatus.PAID_PARTIALLY.value,
-                        OrderStatus.PAID_FULL.value, OrderStatus.ASSEMBLED.value):
+    # Изменить адрес — ТОЛЬКО если заказ ещё НЕ оплачен (NEW)
+    if order.status == OrderStatus.NEW.value:
         buttons.append([{"text": "Изменить адрес доставки", "callback_data": f"change_addr:{order.id}"}])
 
-    # Информация о заказе и назад — всегда
     buttons.append([{"text": "Информация о заказе", "callback_data": f"order:{order.id}"}])
     buttons.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
 
     return create_inline_keyboard(buttons)
+
 
 def kb_orders_list(order_ids: List[int]) -> InlineKeyboardMarkup:
     rows = [[{"text": f"Заказ #{oid}", "callback_data": f"order:{oid}"}] for oid in order_ids]
@@ -1036,7 +1035,7 @@ def format_client_order_info(order: Order) -> str:
         OrderStatus.NEW.value: "🆕 Новый заказ",
         OrderStatus.PAID_PARTIALLY.value: "✅ Предоплачен (30%), ждём сборки",
         OrderStatus.PAID_FULL.value: "💳 Полностью оплачен, ждём сборки",
-        OrderStatus.ASSEMBLED.value: "📦 Собран — ждём дооплату" if order.payment_kind == "pre" else "📦 Собран — скоро отправим",
+        OrderStatus.ASSEMBLED.value: "📦 Собран - ждём дооплату" if order.payment_kind == "pre" else "📦 Собран - скоро отправим",
         OrderStatus.SHIPPED.value: "🚚 Отправлен",
         OrderStatus.ARCHIVED.value: "✅ Доставлен и завершён",
         OrderStatus.ABANDONED.value: "❌ Отменён",
@@ -1071,7 +1070,7 @@ def format_client_order_info(order: Order) -> str:
     ]
 
     # Оплата — подробнее
-    total = order.total_price // 100  # предполагаем, что total_price теперь в рублях (не копейках)
+    total = order.total_price_kop // 100  # предполагаем, что total_price теперь в рублях (не копейках)
     prepay_amount = (total * Config.PREPAY_PERCENT + 99) // 100
     remainder = total - prepay_amount
 
