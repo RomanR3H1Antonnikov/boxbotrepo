@@ -163,11 +163,11 @@ async def get_cdek_prod_token() -> Optional[str]:
 
 async def calculate_cdek_delivery_cost(pvz_code: str) -> Optional[dict]:
     """Возвращает dict: {'cost': int, 'period_min': int, 'period_max': int}"""
-    token = await get_cdek_token()
+    token = await get_cdek_prod_token()
     if not token:
         return None
 
-    url = "https://api.edu.cdek.ru/v2/calculator/tariff"
+    url = "https://api.cdek.ru/v2/calculator/tariff"
     payload = {
         "type": 1,
         "tariff_code": 136,
@@ -204,11 +204,11 @@ async def calculate_cdek_delivery_cost(pvz_code: str) -> Optional[dict]:
 
 async def get_cdek_order_status(cdek_uuid: str) -> Optional[str]:
     """Получает статус заказа по UUID"""
-    token = await get_cdek_token()
+    token = await get_cdek_prod_token()
     if not token or not cdek_uuid:
         return None
 
-    url = f"https://api.edu.cdek.ru/v2/orders/{cdek_uuid}"
+    url = f"https://api.cdek.ru/v2/orders/{cdek_uuid}"
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
@@ -231,11 +231,11 @@ async def get_cdek_order_status(cdek_uuid: str) -> Optional[str]:
 
 async def get_cdek_order_info(cdek_uuid: str) -> Optional[dict]:
     """Полная инфа по заказу в СДЭК по UUID"""
-    token = await get_cdek_token()
+    token = await get_cdek_prod_token()
     if not token or not cdek_uuid:
         return None
 
-    url = f"https://api.edu.cdek.ru/v2/orders/{cdek_uuid}"
+    url = f"https://api.cdek.ru/v2/orders/{cdek_uuid}"
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
@@ -384,8 +384,11 @@ class Config:
     CLOSED_CHANNEL_ID = -1003556936442
 
 # ========== ADMIN ==========
-ADMIN_USERNAMES = {"@RE_HY"}
-ADMIN_ID = 1049170524
+ADMIN_USERNAMES = {"@RE_HY",
+                   "@anbolshakowa",
+                   "@dmitrieva_live",
+                   }
+MAIN_ADMIN_IDS = {1049170524}
 
 # ========== BOOTSTRAP ==========
 bot = Bot(
@@ -480,7 +483,7 @@ async def create_yookassa_payment(order: Order, amount_rub: int, description: st
 
 
 async def create_cdek_order(order_id: int) -> bool:
-    token = await get_cdek_token()
+    token = await get_cdek_prod_token()
     if not token:
         logger.error("Нет токена СДЭК")
         return False
@@ -527,9 +530,9 @@ async def create_cdek_order(order_id: int) -> bool:
         },
 
         "sender": {
-            "company": "ИП Романов Р. А.",
-            "name": "Роман",
-            "phones": [{"number": "+79999999999"}],
+            "company": "ИП Большаков А. М.",
+            "name": "Алексей",
+            "phones": [{"number": "+79651051779"}],
         },
 
         "recipient": {
@@ -573,7 +576,7 @@ async def create_cdek_order(order_id: int) -> bool:
         "Content-Type": "application/json",
     }
 
-    url = "https://api.edu.cdek.ru/v2/orders"
+    url = "https://api.cdek.ru/v2/orders"
 
     # ================== 3. HTTP-запрос ==================
     try:
@@ -690,20 +693,28 @@ async def is_admin(message_or_callback: Message | CallbackQuery) -> bool:
         user = message_or_callback.from_user
     else:  # CallbackQuery
         user = message_or_callback.from_user
+
     uid = user.id
-    if uid == bot.id:  # Игнорируем сообщения от самого бота
-        return False
     username = user.username
-    logger.info(f"Checking admin access: uid={uid}, username={username}")
+
+    # 1. Проверка по ID (самая надёжная)
+    if uid in MAIN_ADMIN_IDS:
+        logger.info(f"Доступ разрешён по ID: {uid}")
+        return True
+
+    # 2. Проверка по username (удобно для команды)
     if username and f"@{username}" in ADMIN_USERNAMES:
-        logger.info("Access granted via username")
+        logger.info(f"Доступ разрешён по username: @{username}")
         return True
-    if uid == ADMIN_ID:
-        logger.info("Access granted via ID")
-        return True
-    logger.info("Access denied")
+
+    logger.info(f"Доступ запрещён: uid={uid}, username=@{username or 'нет'}")
+
+    # Сообщение пользователю
     if isinstance(message_or_callback, Message):
         await message_or_callback.answer("Доступ запрещён. Только для администраторов.")
+    elif isinstance(message_or_callback, CallbackQuery):
+        await message_or_callback.answer("Доступ запрещён", show_alert=True)
+
     return False
 
 async def notify_admin(text: str):
@@ -1965,6 +1976,9 @@ async def cb_change_addr(cb: CallbackQuery):
 # ========== ADMIN PANEL ==========
 @r.callback_query(F.data == CallbackData.ADMIN_PANEL.value)
 async def cb_admin_panel(cb: CallbackQuery):
+    if cb.from_user.id != ADMIN_ID and f"@{cb.from_user.username or ''}" not in ADMIN_USERNAMES:
+        await cb.answer("Доступ запрещён", show_alert=True)
+        return
     logger.info(f"Admin panel callback: user_id={cb.from_user.id}, data={cb.data}")
     if not await is_admin(cb):
         logger.info("Admin access denied")
