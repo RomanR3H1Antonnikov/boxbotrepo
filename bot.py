@@ -7,7 +7,7 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Optional, Dict, List
 from enum import Enum
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from sqlalchemy.orm.attributes import flag_modified
@@ -283,6 +283,7 @@ class OrderStatus(Enum):
     SHIPPED = "shipped"                # Отправлен (CDEK создан)
     ARCHIVED = "archived"              # Завершён
     ABANDONED = "abandoned"            # Отменён
+    PENDING_PAYMENT = "pending_payment"  # Заказ ждет подтверждения оплаты
 
 class Config:
     TOKEN = os.getenv("BOT_TOKEN")
@@ -389,6 +390,7 @@ ADMIN_USERNAMES = {"@RE_HY",
                    "@dmitrieva_live",
                    }
 MAIN_ADMIN_IDS = {1049170524}
+ADMIN_ID = 1049170524
 
 # ========== BOOTSTRAP ==========
 bot = Bot(
@@ -718,10 +720,11 @@ async def is_admin(message_or_callback: Message | CallbackQuery) -> bool:
     return False
 
 async def notify_admin(text: str):
-    try:
-        await bot.send_message(ADMIN_ID, text)
-    except Exception as e:
-        logger.error(f"Admin notify failed: {e}")
+    for admin_id in MAIN_ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception as e:
+            logger.error(f"Admin notify failed for {admin_id}: {e}")
 
 async def notify_admins_payment_started(order: Order):
     engine = make_engine(Config.DB_PATH)
@@ -1880,7 +1883,7 @@ async def cb_pay(cb: CallbackQuery):
             await cb.answer("Оплата уже завершена или невозможна", show_alert=True)
             return
 
-    await send_payment_keyboard(cb.message, order)
+    await send_payment_keyboard(cb.message, order, kind=kind)
     await cb.answer()
 
 
@@ -2483,7 +2486,7 @@ async def cb_gift_no(cb: CallbackQuery):
     await cb.message.answer("Ок, без послания. Переходим к оплате...")
 
     if has_valid_order:
-        await send_payment_keyboard(cb.message, order)
+        await send_payment_keyboard(cb.message, order, kind=None)
     else:
         await cb.message.answer(
             "Заказ не найден или уже оплачен. Начните оформление заново.",
@@ -2493,53 +2496,148 @@ async def cb_gift_no(cb: CallbackQuery):
     await cb.answer()
 
 
-async def send_payment_keyboard(msg: Message, order: Order):
+async def send_payment_keyboard(msg: Message, order: Order, kind: str | None = None):
+    """
+    Показывает клавиатуру оплаты.
+    kind может быть:
+    - None        → показать обе кнопки (full + pre)
+    - "full"      → только полная оплата
+    - "pre"       → только предоплата 30%
+    - "rem"       → только дооплата (остаток)
+    """
     total_rub = order.total_price_kop // 100
     prepay_rub = (total_rub * Config.PREPAY_PERCENT + 99) // 100
     remainder_rub = total_rub - prepay_rub
 
-    base_return_url = f"https://t.me/{(await bot.get_me()).username}?start=payment_success"
+    engine = make_engine(Config.DB_PATH)
 
-    # Полная оплата
-    full_payment = await create_yookassa_payment(
-        order=order,
-        amount_rub=total_rub,
-        description=f"Полная оплата заказа #{order.id} — Коробочка «Отпусти тревогу»",
-        return_url=f"{base_return_url}&order_id={order.id}&kind=full"
-    )
+    # 1. Устанавливаем статус PENDING_PAYMENT (один раз)
+    with Session(engine) as sess:
+        order = sess.merge(order)  # Attach
+        if order.status != OrderStatus.PENDING_PAYMENT.value:
+            order.status = OrderStatus.PENDING_PAYMENT.value
+            if order.extra_data is None:
+                order.extra_data = {}
+            if "pending_payments" not in order.extra_data:
+                order.extra_data["pending_payments"] = {}
+            flag_modified(order, "extra_data")
+            sess.commit()
 
-    # Предоплата 30%
-    pre_payment = await create_yookassa_payment(
-        order=order,
-        amount_rub=prepay_rub,
-        description=f"Предоплата 30% заказа #{order.id} — Коробочка «Отпусти тревогу»",
-        return_url=f"{base_return_url}&order_id={order.id}&kind=pre"
-    )
+    base_return_url = f"https://t.me/{(await bot.get_me()).username}?start=payment_success&order_id={order.id}"
 
     buttons = []
-    if full_payment and full_payment["confirmation_url"]:
-        buttons.append([{
-            "text": f"Оплатить 100% ({total_rub} ₽)",
-            "url": full_payment["confirmation_url"]
-        }])
+    text_lines = []
 
-    if pre_payment and pre_payment["confirmation_url"]:
-        buttons.append([{
-            "text": f"Предоплата 30% ({prepay_rub} ₽)",
-            "url": pre_payment["confirmation_url"]
-        }])
+    # ───────────────────────────────────────────────
+    # Случай 1: kind is None → показываем обе кнопки
+    # ───────────────────────────────────────────────
+    if kind is None:
+        # Полная оплата
+        full_payment = await create_yookassa_payment(
+            order=order,
+            amount_rub=total_rub,
+            description=f"Полная оплата заказа #{order.id} — Коробочка «Отпусти тревогу»",
+            return_url=f"{base_return_url}&kind=full"
+        )
+        if full_payment and full_payment["confirmation_url"]:
+            buttons.append([{
+                "text": f"Оплатить 100% ({total_rub} ₽)",
+                "url": full_payment["confirmation_url"]
+            }])
+            # Сохраняем payment_id
+            with Session(engine) as sess:
+                order = sess.merge(order)
+                order.extra_data["pending_payments"]["full"] = full_payment["payment_id"]
+                flag_modified(order, "extra_data")
+                sess.commit()
 
+        # Предоплата
+        pre_payment = await create_yookassa_payment(
+            order=order,
+            amount_rub=prepay_rub,
+            description=f"Предоплата 30% заказа #{order.id} — Коробочка «Отпусти тревогу»",
+            return_url=f"{base_return_url}&kind=pre"
+        )
+        if pre_payment and pre_payment["confirmation_url"]:
+            buttons.append([{
+                "text": f"Предоплата 30% ({prepay_rub} ₽)",
+                "url": pre_payment["confirmation_url"]
+            }])
+            # Сохраняем payment_id
+            with Session(engine) as sess:
+                order = sess.merge(order)
+                order.extra_data["pending_payments"]["pre"] = pre_payment["payment_id"]
+                flag_modified(order, "extra_data")
+                sess.commit()
+
+        text_lines = [
+            f"<b>Оплата заказа #{order.id}</b>\n",
+            f"Итого: <b>{total_rub} ₽</b>",
+            f"• Предоплата 30% = {prepay_rub} ₽",
+            f"• Остаток = {remainder_rub} ₽\n",
+            "Выберите способ оплаты ↓"
+        ]
+
+    # ───────────────────────────────────────────────
+    # Случай 2: конкретный kind
+    # ───────────────────────────────────────────────
+    else:
+        amount_rub = 0
+        button_text = ""
+        description = ""
+
+        if kind == "full":
+            amount_rub = total_rub
+            button_text = f"Оплатить 100% ({amount_rub} ₽)"
+            description = f"Полная оплата заказа #{order.id} — Коробочка «Отпусти тревогу»"
+        elif kind == "pre":
+            amount_rub = prepay_rub
+            button_text = f"Предоплата 30% ({amount_rub} ₽)"
+            description = f"Предоплата 30% заказа #{order.id} — Коробочка «Отпусти тревогу»"
+        elif kind == "rem":
+            amount_rub = remainder_rub
+            button_text = f"Оплатить остаток ({amount_rub} ₽)"
+            description = f"Дооплата заказа #{order.id} — Коробочка «Отпусти тревогу»"
+        else:
+            await msg.answer("Ошибка: неизвестный тип оплаты.")
+            return
+
+        payment = await create_yookassa_payment(
+            order=order,
+            amount_rub=amount_rub,
+            description=description,
+            return_url=f"{base_return_url}&kind={kind}"
+        )
+
+        if payment and payment["confirmation_url"]:
+            buttons.append([{
+                "text": button_text,
+                "url": payment["confirmation_url"]
+            }])
+            # Сохраняем payment_id
+            with Session(engine) as sess:
+                order = sess.merge(order)
+                order.extra_data["pending_payments"][kind] = payment["payment_id"]
+                flag_modified(order, "extra_data")
+                sess.commit()
+
+        text_lines = [
+            f"<b>Оплата заказа #{order.id}</b>\n",
+            f"К оплате: <b>{amount_rub} ₽</b>",
+            f"После оплаты вернитесь в бот — статус обновится автоматически."
+        ]
+
+    # Общая кнопка "В меню"
     buttons.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
 
-    text = (
-        f"<b>Оплата заказа #{order.id}</b>\n\n"
-        f"Итого: <b>{total_rub} ₽</b>\n"
-        f"• Предоплата 30% = {prepay_rub} ₽\n"
-        f"• Остаток = {remainder_rub} ₽\n\n"
-        f"После оплаты нажмите кнопку ниже или вернитесь в бот - статус обновится автоматически."
-    )
+    text = "\n".join(text_lines)
 
-    await msg.answer(text, reply_markup=create_inline_keyboard(buttons))
+    await msg.answer(
+        text,
+        reply_markup=create_inline_keyboard(buttons),
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
 
 
 @r.callback_query(F.data == "gift:cancel")
@@ -2670,12 +2768,9 @@ async def cb_pvz_confirm(cb: CallbackQuery):
             f"Итого: <b>{total} ₽</b>\n"
             f"• Предоплата {Config.PREPAY_PERCENT}% = {prepay} ₽\n"
             f"• Остаток = {total - prepay} ₽",
-            reply_markup=create_inline_keyboard([
-                [{"text": f"Оплатить 100% ({total} ₽)", "callback_data": f"pay:full:{order.id}"},
-                 {"text": f"Предоплата {Config.PREPAY_PERCENT}% ({prepay} ₽)", "callback_data": f"pay:pre:{order.id}"}],
-                [{"text": "Назад", "callback_data": CallbackData.GALLERY.value}],
-            ])
+            reply_markup=None  # убираем кнопки, т.к. теперь вызовем send_payment_keyboard
         )
+    await send_payment_keyboard(cb.message, order, kind=None)
     await cb.answer("Готово!")
 
 
@@ -3789,6 +3884,49 @@ async def check_all_shipped_orders():
         await asyncio.sleep(300)  # 5 минут - оптимально
 
 
+async def check_pending_timeouts():
+    while True:
+        try:
+            engine = make_engine(Config.DB_PATH)
+            with Session(engine) as sess:
+                pending_orders = sess.query(Order).filter(
+                    Order.status == OrderStatus.PENDING_PAYMENT.value,
+                    Order.created_at < datetime.now(timezone.utc) - timedelta(seconds=Config.PAYMENT_TIMEOUT_SEC)
+                ).all()
+
+                for order in pending_orders:
+                    # Проверяем, не оплачен ли уже (на случай race)
+                    succeeded = False
+                    for k, pid in order.extra_data.get("pending_payments", {}).items():
+                        try:
+                            payment = Payment.find_one(pid)
+                            if payment.status == "succeeded":
+                                succeeded = True
+                                # Авто-обновляем как в handle
+                                if k == "full":
+                                    order.payment_kind = "full"
+                                    order.status = OrderStatus.PAID_FULL.value
+                                elif k == "pre":
+                                    order.payment_kind = "pre"
+                                    order.status = OrderStatus.PAID_PARTIALLY.value
+                                elif k == "rem":
+                                    order.payment_kind = "remainder"
+                                    order.status = OrderStatus.PAID_FULL.value
+                                await notify_admins_payment_success(order.id)  # generic
+                                break
+                        except:
+                            pass
+
+                    if not succeeded:
+                        order.status = OrderStatus.ABANDONED.value
+                        sess.commit()
+                        await bot.send_message(order.user_id, f"Ваш заказ #{order.id} был отменён из-за отсутствия оплаты в течение 10 минут.")
+
+            await asyncio.sleep(60)  # Проверять каждую минуту
+        except Exception as e:
+            logger.exception(f"Ошибка в check_pending_timeouts: {e}")
+
+
 async def check_channel_permissions():
     try:
         member = await bot.get_chat_member(Config.CLOSED_CHANNEL_ID, bot.id)
@@ -3896,6 +4034,10 @@ async def main():
     if 'orders' not in tables:
         logger.error("Таблица orders НЕ создана! Проверь import models в init_db.py")
 
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
+    server = uvicorn.Server(config)
+    asyncio.create_task(server.serve())
+
     # Засеиваем данные
     with Session(engine) as sess:
         # Читай коды из файла promocodes.txt
@@ -3912,6 +4054,7 @@ async def main():
 
     await asyncio.sleep(15)
     asyncio.create_task(check_all_shipped_orders())
+    asyncio.create_task(check_pending_timeouts())
     await check_channel_permissions()
 
     while True:
@@ -3922,6 +4065,97 @@ async def main():
             logger.error(f"Polling упал: {type(e).__name__}: {e}")
             logger.info("Жду 15 секунд перед повторным подключением...")
             await asyncio.sleep(15)
+
+
+# ───────────────────────────────────────────────
+# WEBHOOK ОТ ЮKASSA (отдельный FastAPI сервер)
+# ───────────────────────────────────────────────
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+import uvicorn
+app = FastAPI(title="YooKassa Webhook")
+
+
+@app.post("/webhook/yookassa")
+async def yookassa_webhook(request: Request):
+    try:
+        # Получаем тело запроса
+        payload = await request.json()
+
+        # Проверяем подпись (обязательно!)
+        signature = request.headers.get("X-YooKassa-Signature")
+        if not signature:
+            raise HTTPException(status_code=400, detail="Missing signature")
+
+        # Проверяем, что это уведомление от ЮKassa
+        notification = WebhookNotification(payload)
+
+        # Проверяем подпись
+        if not notification.verify_signature(signature):
+            raise HTTPException(status_code=400, detail="Invalid signature")
+
+        event = notification.event
+        payment = notification.object
+
+        logger.info(f"Получено уведомление от ЮKassa: {event} | Payment ID: {payment.id}")
+
+        if event == "payment.succeeded":
+            # Находим заказ по метаданным
+            order_id = payment.metadata.get("order_id")
+            if not order_id:
+                logger.error("В уведомлении нет order_id!")
+                return JSONResponse(status_code=200, content={"ok": True})
+
+            engine = make_engine(Config.DB_PATH)
+            with Session(engine) as sess:
+                order = sess.get(Order, int(order_id))
+                if not order:
+                    logger.error(f"Заказ {order_id} не найден по уведомлению")
+                    return JSONResponse(status_code=200, content={"ok": True})
+
+                # Проверяем, не обработан ли уже
+                if order.status in (OrderStatus.PAID_FULL.value, OrderStatus.SHIPPED.value, OrderStatus.ARCHIVED.value):
+                    logger.info(f"Заказ {order_id} уже обработан, пропускаем")
+                    return JSONResponse(status_code=200, content={"ok": True})
+
+                # Обновляем статус
+                kind = payment.metadata.get("payment_kind", "unknown")
+                if kind == "full":
+                    order.payment_kind = "full"
+                    order.status = OrderStatus.PAID_FULL.value
+                elif kind == "pre":
+                    order.payment_kind = "pre"
+                    order.status = OrderStatus.PAID_PARTIALLY.value
+                elif kind == "rem":
+                    order.payment_kind = "remainder"
+                    order.status = OrderStatus.PAID_FULL.value
+
+                # Сохраняем payment_id
+                if not order.extra_data:
+                    order.extra_data = {}
+                order.extra_data["yookassa_payment_id"] = payment.id
+                flag_modified(order, "extra_data")
+
+                sess.commit()
+
+                # Уведомляем админов и клиента
+                await notify_admins_payment_success(order.id)
+                await bot.send_message(
+                    order.user_id,
+                    f"✅ Оплата прошла успешно! Заказ <b>#{order.id}</b> принят в обработку.\n\n"
+                    f"Статус обновлён автоматически.",
+                    parse_mode="HTML",
+                    reply_markup=kb_order_status(order)
+                )
+
+                logger.info(f"Успешно обработано уведомление: заказ #{order.id} → {order.status}")
+
+        return JSONResponse(status_code=200, content={"ok": True})
+
+    except Exception as e:
+        logger.exception("Ошибка обработки webhook от ЮKassa")
+        # ЮKassa требует 200 OK даже при ошибке, иначе будет слать повторно
+        return JSONResponse(status_code=200, content={"ok": False, "error": str(e)})
 
 
 if __name__ == "__main__":
