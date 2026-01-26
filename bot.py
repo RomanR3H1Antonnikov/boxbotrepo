@@ -2431,6 +2431,10 @@ async def cb_gift_yes(cb: CallbackQuery):
         # FIX: ищем последний NEW-заказ пользователя
         orders = get_user_orders_db(sess, cb.from_user.id)
         order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
+        if not order:
+            await cb.answer("Нет активного заказа", show_alert=True)
+            return
+        order = sess.merge(order)  # ← обязательно attach, если order из get_user_orders_db
 
         if not order or order.status != OrderStatus.NEW.value:
             await cb.answer("Заказ устарел. Начните оформление заново.", show_alert=True)
@@ -2501,15 +2505,18 @@ async def cb_gift_no(cb: CallbackQuery):
     await cb.answer()
 
 
-async def send_payment_keyboard(msg: Message, order_id: int, kind: str | None = None):
-    """
-    Показывает клавиатуру оплаты.
-    Теперь принимает order_id вместо объекта Order
-    """
+async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: str | None = None):
     engine = make_engine(Config.DB_PATH)
 
     with Session(engine) as sess:
-        order = sess.get(Order, order_id)
+        # Если передали объект — берём его ID и перезагружаем свежий из базы
+        if isinstance(order_or_id, Order):
+            order_id = order_or_id.id
+            order = sess.get(Order, order_id)
+        else:
+            order_id = order_or_id
+            order = sess.get(Order, order_id)
+
         if not order:
             await msg.answer("Заказ не найден. Попробуйте начать заново.")
             return
@@ -2938,7 +2945,7 @@ async def on_message_router(message: Message):
             sess.commit()
 
             await message.answer("💌 Послание сохранено!")
-            await send_payment_keyboard(message, order)
+            await send_payment_keyboard(message, order.id)
             return
 
 
