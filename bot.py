@@ -2460,6 +2460,8 @@ async def cb_gift_yes(cb: CallbackQuery):
 async def cb_gift_no(cb: CallbackQuery):
     engine = make_engine(Config.DB_PATH)
 
+    order_id = None
+
     with Session(engine) as sess:
         user = get_user_by_id(sess, cb.from_user.id)
         if not user:
@@ -2477,16 +2479,19 @@ async def cb_gift_no(cb: CallbackQuery):
                 order.extra_data["gift_message"] = "Без послания"
             flag_modified(order, "extra_data")
 
+            order_id = order.id  # ← сохраняем только ID !
+
         user.awaiting_gift_message = False
         sess.commit()
 
-        # Now check status INSIDE session (after merge)
-        has_valid_order = order and order.status == OrderStatus.NEW.value
+        # Проверяем, есть ли валидный заказ
+        has_valid_order = order_id is not None
 
     await cb.message.answer("Ок, без послания. Переходим к оплате...")
 
     if has_valid_order:
-        await send_payment_keyboard(cb.message, order, kind=None)
+        # Передаём ТОЛЬКО ID, а не объект!
+        await send_payment_keyboard(cb.message, order_id=order_id, kind=None)
     else:
         await cb.message.answer(
             "Заказ не найден или уже оплачен. Начните оформление заново.",
@@ -2496,24 +2501,24 @@ async def cb_gift_no(cb: CallbackQuery):
     await cb.answer()
 
 
-async def send_payment_keyboard(msg: Message, order: Order, kind: str | None = None):
+async def send_payment_keyboard(msg: Message, order_id: int, kind: str | None = None):
     """
     Показывает клавиатуру оплаты.
-    kind может быть:
-    - None        → показать обе кнопки (full + pre)
-    - "full"      → только полная оплата
-    - "pre"       → только предоплата 30%
-    - "rem"       → только дооплата (остаток)
+    Теперь принимает order_id вместо объекта Order
     """
-    total_rub = order.total_price_kop // 100
-    prepay_rub = (total_rub * Config.PREPAY_PERCENT + 99) // 100
-    remainder_rub = total_rub - prepay_rub
-
     engine = make_engine(Config.DB_PATH)
 
-    # 1. Устанавливаем статус PENDING_PAYMENT (один раз)
     with Session(engine) as sess:
-        order = sess.merge(order)  # Attach
+        order = sess.get(Order, order_id)
+        if not order:
+            await msg.answer("Заказ не найден. Попробуйте начать заново.")
+            return
+
+        total_rub = order.total_price_kop // 100
+        prepay_rub = (total_rub * Config.PREPAY_PERCENT + 99) // 100
+        remainder_rub = total_rub - prepay_rub
+
+        # 1. Устанавливаем статус PENDING_PAYMENT (если нужно)
         if order.status != OrderStatus.PENDING_PAYMENT.value:
             order.status = OrderStatus.PENDING_PAYMENT.value
             if order.extra_data is None:
@@ -2521,117 +2526,108 @@ async def send_payment_keyboard(msg: Message, order: Order, kind: str | None = N
             if "pending_payments" not in order.extra_data:
                 order.extra_data["pending_payments"] = {}
             flag_modified(order, "extra_data")
-            sess.commit()
 
-    base_return_url = f"https://t.me/{(await bot.get_me()).username}?start=payment_success&order_id={order.id}"
+        # Получаем username бота ОДИН РАЗ внутри сессии
+        bot_info = await bot.get_me()
+        base_return_url = f"https://t.me/{bot_info.username}?start=payment_success&order_id={order.id}"
 
-    buttons = []
-    text_lines = []
+        buttons = []
+        text_lines = []
 
-    # ───────────────────────────────────────────────
-    # Случай 1: kind is None → показываем обе кнопки
-    # ───────────────────────────────────────────────
-    if kind is None:
-        # Полная оплата
-        full_payment = await create_yookassa_payment(
-            order=order,
-            amount_rub=total_rub,
-            description=f"Полная оплата заказа #{order.id} — Коробочка «Отпусти тревогу»",
-            return_url=f"{base_return_url}&kind=full"
-        )
-        if full_payment and full_payment["confirmation_url"]:
-            buttons.append([{
-                "text": f"Оплатить 100% ({total_rub} ₽)",
-                "url": full_payment["confirmation_url"]
-            }])
-            # Сохраняем payment_id
-            with Session(engine) as sess:
-                order = sess.merge(order)
+        # ───────────────────────────────────────────────
+        # Случай 1: kind is None → показываем обе кнопки
+        # ───────────────────────────────────────────────
+        if kind is None:
+            # Полная оплата
+            full_payment = await create_yookassa_payment(
+                order=order,
+                amount_rub=total_rub,
+                description=f"Полная оплата заказа #{order.id} — Коробочка «Отпусти тревогу»",
+                return_url=f"{base_return_url}&kind=full"
+            )
+            if full_payment and full_payment["confirmation_url"]:
+                buttons.append([{
+                    "text": f"Оплатить 100% ({total_rub} ₽)",
+                    "url": full_payment["confirmation_url"]
+                }])
                 order.extra_data["pending_payments"]["full"] = full_payment["payment_id"]
                 flag_modified(order, "extra_data")
-                sess.commit()
 
-        # Предоплата
-        pre_payment = await create_yookassa_payment(
-            order=order,
-            amount_rub=prepay_rub,
-            description=f"Предоплата 30% заказа #{order.id} — Коробочка «Отпусти тревогу»",
-            return_url=f"{base_return_url}&kind=pre"
-        )
-        if pre_payment and pre_payment["confirmation_url"]:
-            buttons.append([{
-                "text": f"Предоплата 30% ({prepay_rub} ₽)",
-                "url": pre_payment["confirmation_url"]
-            }])
-            # Сохраняем payment_id
-            with Session(engine) as sess:
-                order = sess.merge(order)
+            # Предоплата
+            pre_payment = await create_yookassa_payment(
+                order=order,
+                amount_rub=prepay_rub,
+                description=f"Предоплата 30% заказа #{order.id} — Коробочка «Отпусти тревогу»",
+                return_url=f"{base_return_url}&kind=pre"
+            )
+            if pre_payment and pre_payment["confirmation_url"]:
+                buttons.append([{
+                    "text": f"Предоплата 30% ({prepay_rub} ₽)",
+                    "url": pre_payment["confirmation_url"]
+                }])
                 order.extra_data["pending_payments"]["pre"] = pre_payment["payment_id"]
                 flag_modified(order, "extra_data")
-                sess.commit()
 
-        text_lines = [
-            f"<b>Оплата заказа #{order.id}</b>\n",
-            f"Итого: <b>{total_rub} ₽</b>",
-            f"• Предоплата 30% = {prepay_rub} ₽",
-            f"• Остаток = {remainder_rub} ₽\n",
-            "Выберите способ оплаты ↓"
-        ]
+            text_lines = [
+                f"<b>Оплата заказа #{order.id}</b>\n",
+                f"Итого: <b>{total_rub} ₽</b>",
+                f"• Предоплата 30% = {prepay_rub} ₽",
+                f"• Остаток = {remainder_rub} ₽\n",
+                "Выберите способ оплаты ↓"
+            ]
 
-    # ───────────────────────────────────────────────
-    # Случай 2: конкретный kind
-    # ───────────────────────────────────────────────
-    else:
-        amount_rub = 0
-        button_text = ""
-        description = ""
-
-        if kind == "full":
-            amount_rub = total_rub
-            button_text = f"Оплатить 100% ({amount_rub} ₽)"
-            description = f"Полная оплата заказа #{order.id} — Коробочка «Отпусти тревогу»"
-        elif kind == "pre":
-            amount_rub = prepay_rub
-            button_text = f"Предоплата 30% ({amount_rub} ₽)"
-            description = f"Предоплата 30% заказа #{order.id} — Коробочка «Отпусти тревогу»"
-        elif kind == "rem":
-            amount_rub = remainder_rub
-            button_text = f"Оплатить остаток ({amount_rub} ₽)"
-            description = f"Дооплата заказа #{order.id} — Коробочка «Отпусти тревогу»"
+        # ───────────────────────────────────────────────
+        # Случай 2: конкретный kind
+        # ───────────────────────────────────────────────
         else:
-            await msg.answer("Ошибка: неизвестный тип оплаты.")
-            return
+            amount_rub = 0
+            button_text = ""
+            description = ""
 
-        payment = await create_yookassa_payment(
-            order=order,
-            amount_rub=amount_rub,
-            description=description,
-            return_url=f"{base_return_url}&kind={kind}"
-        )
+            if kind == "full":
+                amount_rub = total_rub
+                button_text = f"Оплатить 100% ({amount_rub} ₽)"
+                description = f"Полная оплата заказа #{order.id} — Коробочка «Отпусти тревогу»"
+            elif kind == "pre":
+                amount_rub = prepay_rub
+                button_text = f"Предоплата 30% ({amount_rub} ₽)"
+                description = f"Предоплата 30% заказа #{order.id} — Коробочка «Отпусти тревогу»"
+            elif kind == "rem":
+                amount_rub = remainder_rub
+                button_text = f"Оплатить остаток ({amount_rub} ₽)"
+                description = f"Дооплата заказа #{order.id} — Коробочка «Отпусти тревогу»"
+            else:
+                await msg.answer("Ошибка: неизвестный тип оплаты.")
+                return
 
-        if payment and payment["confirmation_url"]:
-            buttons.append([{
-                "text": button_text,
-                "url": payment["confirmation_url"]
-            }])
-            # Сохраняем payment_id
-            with Session(engine) as sess:
-                order = sess.merge(order)
+            payment = await create_yookassa_payment(
+                order=order,
+                amount_rub=amount_rub,
+                description=description,
+                return_url=f"{base_return_url}&kind={kind}"
+            )
+
+            if payment and payment["confirmation_url"]:
+                buttons.append([{
+                    "text": button_text,
+                    "url": payment["confirmation_url"]
+                }])
                 order.extra_data["pending_payments"][kind] = payment["payment_id"]
                 flag_modified(order, "extra_data")
-                sess.commit()
 
-        text_lines = [
-            f"<b>Оплата заказа #{order.id}</b>\n",
-            f"К оплате: <b>{amount_rub} ₽</b>",
-            f"После оплаты вернитесь в бот — статус обновится автоматически."
-        ]
+            text_lines = [
+                f"<b>Оплата заказа #{order.id}</b>\n",
+                f"К оплате: <b>{amount_rub} ₽</b>",
+                f"После оплаты вернитесь в бот — статус обновится автоматически."
+            ]
 
-    # Общая кнопка "В меню"
-    buttons.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
+        # Общая кнопка "В меню"
+        buttons.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
 
+        sess.commit()  # финальный коммит всех изменений
+
+    # Отправка сообщения уже вне сессии
     text = "\n".join(text_lines)
-
     await msg.answer(
         text,
         reply_markup=create_inline_keyboard(buttons),
@@ -2770,7 +2766,7 @@ async def cb_pvz_confirm(cb: CallbackQuery):
             f"• Остаток = {total - prepay} ₽",
             reply_markup=None  # убираем кнопки, т.к. теперь вызовем send_payment_keyboard
         )
-    await send_payment_keyboard(cb.message, order, kind=None)
+    await send_payment_keyboard(cb.message, order_id=order.id, kind=None)
     await cb.answer("Готово!")
 
 
