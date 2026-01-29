@@ -4177,7 +4177,6 @@ async def yookassa_webhook(request: Request):
         logger.exception("Критическая ошибка в yookassa_webhook")
         return JSONResponse(status_code=200, content={"ok": True})
 
-setup_application(app, dp, bot=bot)
 
 # Секретный токен (придумай свой длинный, 32+ символов, сохрани в .env или здесь)
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "fallback_secret_if_not_set")
