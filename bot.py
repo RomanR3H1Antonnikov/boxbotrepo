@@ -32,10 +32,16 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+import uvicorn
+
+app = FastAPI(title="Boxbot Webhooks")
 
 
 # ========== CONFIG ==========
-USE_WEBHOOK = False
+USE_WEBHOOK = True
 load_dotenv(dotenv_path=Path(__file__).parent / '.env')
 print("Текущая рабочая директория:", os.getcwd())
 print("Существует ли .env:", os.path.exists('.env'))
@@ -4024,8 +4030,8 @@ async def handle_payment_success(message: Message):
 
 # ========== ENTRYPOINT ==========
 async def main():
-    logger.info("Бот запущен - режим polling с автоматическим переподключением")
-    logger.info("BOT VERSION MARK: 2025-12-23 FINAL")
+    logger.info("Бот запущен в режиме WEBHOOK")
+    logger.info("BOT VERSION MARK: 2026-01-29 FINAL (webhook)")
 
     engine = make_engine(Config.DB_PATH)
     init_db(engine)
@@ -4034,40 +4040,42 @@ async def main():
     inspector = inspect(engine)
     tables = inspector.get_table_names()
     logger.info(f"Таблицы после init_db: {tables}")
-    if 'orders' not in tables:
-        logger.error("Таблица orders НЕ создана! Проверь import models в init_db.py")
 
-    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
-    server = uvicorn.Server(config)
-    asyncio.create_task(server.serve())
-
-    # Засеиваем данные
+    # Засеиваем данные (промокоды и т.д.)
     with Session(engine) as sess:
-        # Читай коды из файла promocodes.txt
         try:
             with open("INFO_FOR_DB/PROMOCODES/promocodes.txt", "r", encoding="utf-8") as f:
                 codes = [line.strip() for line in f if line.strip().isdigit() and len(line.strip()) == 3]
             logger.info(f"Загружено {len(codes)} кодов из promocodes.txt")
         except FileNotFoundError:
-            logger.error("Файл promocodes.txt НЕ НАЙДЕН! Коды НЕ загружены!")
+            logger.error("Файл promocodes.txt НЕ НАЙДЕН!")
             codes = []
 
         seed_data(sess, anxiety_codes=codes)
         sess.commit()
 
-    await asyncio.sleep(15)
+    # Запускаем фоновые задачи
+    await asyncio.sleep(5)  # даём время на инициализацию
     asyncio.create_task(check_all_shipped_orders())
     asyncio.create_task(check_pending_timeouts())
     await check_channel_permissions()
 
-    while True:
-        try:
-            logger.info("Запуск polling с Telegram...")
-            await dp.start_polling(bot)
-        except Exception as e:
-            logger.error(f"Polling упал: {type(e).__name__}: {e}")
-            logger.info("Жду 15 секунд перед повторным подключением...")
-            await asyncio.sleep(15)
+    # Устанавливаем webhook при старте
+    await on_startup()
+
+    # Запускаем единый сервер
+    port = int(os.getenv("WEBHOOK_PORT", 8000))
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+        workers=1  # для начала 1, потом можно увеличить
+    )
+    server = uvicorn.Server(config)
+
+    logger.info(f"Запускаю FastAPI на порту {port} (Telegram + YooKassa webhook)")
+    await server.serve()
 
 
 # ───────────────────────────────────────────────
@@ -4082,26 +4090,21 @@ app = FastAPI(title="YooKassa Webhook")
 @app.post("/webhook/yookassa")
 async def yookassa_webhook(request: Request):
     try:
-        # 1. Получаем сырое тело и заголовки
         payload = await request.json()
         signature = request.headers.get("X-YooKassa-Signature")
 
         logger.info(f"Получен webhook от YooKassa | IP: {request.client.host}")
 
-        # 2. Проверяем наличие подписи
         if not signature:
             logger.error("Webhook без подписи X-YooKassa-Signature!")
             return JSONResponse(status_code=200, content={"ok": True})
 
-        # 3. Пытаемся создать уведомление (оно само проверит подпись)
         try:
             notification = WebhookNotification(payload)
         except Exception as inner_e:
             logger.error(f"Ошибка создания WebhookNotification: {inner_e}")
-            logger.error(f"Payload: {payload}")
             return JSONResponse(status_code=200, content={"ok": True})
 
-        # 4. Дополнительная проверка подписи (на всякий случай)
         if not notification.verify_signature(signature):
             logger.error("Неверная подпись webhook!")
             return JSONResponse(status_code=200, content={"ok": True})
@@ -4173,8 +4176,37 @@ async def yookassa_webhook(request: Request):
 
     except Exception as e:
         logger.exception("Критическая ошибка в yookassa_webhook")
-        # Обязательно 200 OK для ЮKassa
         return JSONResponse(status_code=200, content={"ok": True})
+
+
+# Настройка aiogram webhook (Telegram будет слать сюда)
+async def on_startup():
+    webhook_path = "/webhook/telegram"
+    webhook_url = f"https://bot.rehy.ru{webhook_path}"
+
+    await bot.set_webhook(
+        url=webhook_url,
+        secret_token="мой_секретный_токен_для_telegram_2026"  # придумай свой длинный секрет (32+ символов)
+    )
+    logger.info(f"Webhook для Telegram установлен: {webhook_url}")
+
+
+async def on_shutdown():
+    await bot.delete_webhook()
+    logger.info("Webhook для Telegram удалён")
+
+
+# Регистрируем aiogram в FastAPI
+webhook_handler = SimpleRequestHandler(
+    dispatcher=dp,
+    bot=bot,
+    secret_token="мой_секретный_токен_для_telegram_2026"  # тот же самый секрет!
+)
+
+webhook_handler.register(app, path="/webhook/telegram")
+
+# Инициализация aiogram (важно!)
+setup_application(app, dp, bot=bot)
 
 
 if __name__ == "__main__":
