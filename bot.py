@@ -34,11 +34,10 @@ from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.webhook.aiohttp_server import setup_application
 import uvicorn
 
-app = FastAPI(title="Boxbot Webhooks")
-
+app = FastAPI()
 
 # ========== CONFIG ==========
 USE_WEBHOOK = True
@@ -4178,35 +4177,28 @@ async def yookassa_webhook(request: Request):
         logger.exception("Критическая ошибка в yookassa_webhook")
         return JSONResponse(status_code=200, content={"ok": True})
 
+setup_application(app, dp, bot=bot)
 
-# Настройка aiogram webhook (Telegram будет слать сюда)
+# Секретный токен (придумай свой длинный, 32+ символов, сохрани в .env или здесь)
+WEBHOOK_SECRET = "super_long_secret_token_for_telegram_webhook_2026_random_string_1234567890"
+
+WEBHOOK_PATH = "/webhook/telegram"
+
+@app.on_event("startup")
 async def on_startup():
-    webhook_path = "/webhook/telegram"
-    webhook_url = f"https://bot.rehy.ru{webhook_path}"
-
+    webhook_url = f"https://bot.rehy.ru{WEBHOOK_PATH}"
     await bot.set_webhook(
         url=webhook_url,
-        secret_token="мой_секретный_токен_для_telegram_2026"  # придумай свой длинный секрет (32+ символов)
+        secret_token=WEBHOOK_SECRET,
+        allowed_updates=dp.resolve_used_update_types(),  # только нужные типы обновлений
+        drop_pending_updates=True  # очистить очередь при старте
     )
-    logger.info(f"Webhook для Telegram установлен: {webhook_url}")
+    logger.info(f"Telegram webhook успешно установлен: {webhook_url}")
 
-
+@app.on_event("shutdown")
 async def on_shutdown():
-    await bot.delete_webhook()
-    logger.info("Webhook для Telegram удалён")
-
-
-# Регистрируем aiogram в FastAPI
-webhook_handler = SimpleRequestHandler(
-    dispatcher=dp,
-    bot=bot,
-    secret_token="мой_секретный_токен_для_telegram_2026"  # тот же самый секрет!
-)
-
-webhook_handler.register(app, path="/webhook/telegram")
-
-# Инициализация aiogram (важно!)
-setup_application(app, dp, bot=bot)
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Telegram webhook удалён при остановке")
 
 
 if __name__ == "__main__":
