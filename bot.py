@@ -4180,7 +4180,7 @@ async def yookassa_webhook(request: Request):
 setup_application(app, dp, bot=bot)
 
 # Секретный токен (придумай свой длинный, 32+ символов, сохрани в .env или здесь)
-WEBHOOK_SECRET = "super_long_secret_token_for_telegram_webhook_2026_random_string_1234567890"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "fallback_secret_if_not_set")
 
 WEBHOOK_PATH = "/webhook/telegram"
 
