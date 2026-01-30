@@ -2520,7 +2520,7 @@ async def cb_gift_no(cb: CallbackQuery):
 
     if has_valid_order:
         # Передаём ТОЛЬКО ID, а не объект!
-        await send_payment_keyboard(cb.message, order_id=order_id, kind=None)
+        await send_payment_keyboard(cb.message, order_or_id=order_id, kind=None)
     else:
         await cb.message.answer(
             "Заказ не найден или уже оплачен. Начните оформление заново.",
