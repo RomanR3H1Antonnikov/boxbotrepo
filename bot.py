@@ -38,6 +38,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 app = FastAPI()
 
+
+@app.get("/test")
+async def test_endpoint():
+    logger.info("Test endpoint hit!")
+    return {"status": "ok", "message": "Server alive"}
+
+
 # ========== CONFIG ==========
 USE_WEBHOOK = True
 load_dotenv(dotenv_path=Path(__file__).parent / '.env')
@@ -396,6 +403,9 @@ class Config:
     # CHANEL
     CLOSED_CHANNEL_LINK = "https://t.me/+n85Qa4GPd1s5Yzgy"
     CLOSED_CHANNEL_ID = -1003556936442
+
+    USE_WEBHOOK = os.getenv("USE_WEBHOOK", "True") == "True"  # True по default, False для polling
+
 
 # ========== ADMIN ==========
 ADMIN_USERNAMES = {"@RE_HY",
@@ -2454,7 +2464,7 @@ async def cb_gift_yes(cb: CallbackQuery):
             reset_states(user)
             sess.commit()
             return
-        
+
         if not order:
             await cb.answer("Нет активного заказа", show_alert=True)
             return
@@ -4098,6 +4108,9 @@ import uvicorn
 
 @app.post("/webhook/yookassa")
 async def yookassa_webhook(request: Request):
+    logger.info(f"YooKassa webhook from IP: {request.client.host} | Headers: {dict(request.headers)}")
+    json_data = await request.json()
+    logger.debug(f"YooKassa payload: {json_data}")
     try:
         payload = await request.json()
         signature = request.headers.get("X-YooKassa-Signature")
@@ -4228,9 +4241,13 @@ async def on_startup():
         drop_pending_updates=True  # очистить очередь при старте
     )
     webhook_info = await bot.get_webhook_info()
-    logger.info(f"Current webhook info after set: {webhook_info}")
-    if webhook_info.url != webhook_url:
-        logger.error("Webhook set failed! Current URL mismatch.")
+    logger.info(
+        f"Current webhook info after set: {webhook_info.dict() if webhook_info else 'None'}")  # .dict() для print
+    if webhook_info.last_error_date:
+        logger.error(
+            f"Last TG webhook error: date={webhook_info.last_error_date}, msg={webhook_info.last_error_message}")
+    if webhook_info.pending_update_count > 0:
+        logger.warning(f"Pending updates: {webhook_info.pending_update_count} - TG queue stuck?")
     logger.info(f"Telegram webhook успешно установлен: {webhook_url}")
 
 @app.on_event("shutdown")
