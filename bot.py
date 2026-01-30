@@ -34,17 +34,14 @@ from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from aiogram.webhook.aiohttp_server import setup_application
 import uvicorn
+from aiogram.types import Update
 
 app = FastAPI()
 
 # ========== CONFIG ==========
 USE_WEBHOOK = True
 load_dotenv(dotenv_path=Path(__file__).parent / '.env')
-print("Текущая рабочая директория:", os.getcwd())
-print("Существует ли .env:", os.path.exists('.env'))
-print("Содержимое os.environ (первые 10):", list(os.environ.items())[:10])
 
 # === PAYMENT LOCKS (защита от повторных нажатий) ===
 _payment_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -4182,6 +4179,22 @@ async def yookassa_webhook(request: Request):
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "fallback_secret_if_not_set")
 
 WEBHOOK_PATH = "/webhook/telegram"
+
+
+@app.post(WEBHOOK_PATH)  # "/webhook/telegram"
+async def telegram_webhook(request: Request):
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid secret token")
+
+    try:
+        json_data = await request.json()
+        update = Update(**json_data)  # Парсим в aiogram Update
+        await dp.feed_update(bot, update)  # Кормим в Dispatcher (он обработает handlers)
+        return {"ok": True}
+    except Exception as e:
+        logger.exception(f"Ошибка в Telegram webhook: {e}")
+        return {"ok": False}  # TG ожидает 200, даже при ошибке
+
 
 @app.on_event("startup")
 async def on_startup():
