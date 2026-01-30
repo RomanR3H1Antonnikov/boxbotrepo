@@ -4046,76 +4046,6 @@ async def handle_payment_success(message: Message):
     await message.answer(format_client_order_info(order), reply_markup=kb_order_status(order))
 
 
-# ========== ENTRYPOINT ==========
-async def main():
-    logger.info("Бот запущен в режиме WEBHOOK")
-    logger.info("BOT VERSION MARK: 2026-01-29 FINAL (webhook)")
-
-    retries = 3  # Добавь: количество попыток
-    while retries > 0:
-        try:
-            engine = make_engine(Config.DB_PATH)
-            init_db(engine)
-
-            inspector = inspect(engine)
-            tables = inspector.get_table_names()
-            logger.info(f"Таблицы после init_db: {tables}")
-
-            # Засеиваем данные (промокоды и т.д.)
-            with Session(engine) as sess:
-                try:
-                    with open("INFO_FOR_DB/PROMOCODES/promocodes.txt", "r", encoding="utf-8") as f:
-                        codes = [line.strip() for line in f if line.strip().isdigit() and len(line.strip()) == 3]
-                    logger.info(f"Загружено {len(codes)} кодов из promocodes.txt")
-                except FileNotFoundError:
-                    logger.error("Файл promocodes.txt НЕ НАЙДЕН!")
-                    codes = []
-
-                seed_data(sess, anxiety_codes=codes)
-                sess.commit()
-
-            # После seed - чек таблиц (твой код)
-            inspector = inspect(engine)
-            if not inspector.has_table("users") or not inspector.has_table("orders"):
-                logger.error("Критическая ошибка: таблицы не созданы после init_db! Бот остановлен.")
-                return
-
-            logger.info("DB проверена: все таблицы на месте.")
-            break  # Успех - выходим из retry
-        except Exception as e:
-            retries -= 1
-            logger.error(f"Ошибка init DB (retry оставшихся: {retries}): {e}")
-            await asyncio.sleep(5)  # Ждём 5 сек перед следующей попыткой
-    if retries == 0:
-        logger.critical("Не удалось инициализировать DB после 3 попыток - бот остановлен.")
-        return  # Остановка на failure
-
-    # Запускаем фоновые задачи ТОЛЬКО после успешной инициализации БД
-    await asyncio.sleep(2)  # маленький sleep, чтобы engine "устаканился"
-    asyncio.create_task(check_all_shipped_orders())
-    asyncio.create_task(check_pending_timeouts())
-    await check_channel_permissions()
-
-    if Config.USE_WEBHOOK:
-        await on_startup()  # webhook set
-
-        port = int(os.getenv("WEBHOOK_PORT", 8000))
-        config = uvicorn.Config(
-            app,
-            host="0.0.0.0",
-            port=port,
-            log_level="info",
-            workers=1
-        )
-        server = uvicorn.Server(config)
-
-        logger.info(f"Запускаю FastAPI на порту {port} (Telegram + YooKassa webhook)")
-        await server.serve()  # ← сервер запускается только здесь, после БД
-    else:
-        logger.warning("Fallback to polling mode")
-        await dp.start_polling(bot)
-
-
 # ───────────────────────────────────────────────
 # WEBHOOK ОТ ЮKASSA (отдельный FastAPI сервер)
 # ───────────────────────────────────────────────
@@ -4251,28 +4181,77 @@ async def telegram_webhook(request: Request):
 
 @app.on_event("startup")
 async def on_startup():
+    logger.info("=== FastAPI Startup: начало инициализации ===")
+    logger.info("BOT VERSION MARK: 2026-01-29 FINAL (webhook)")
+
+    retries = 3
+    engine = None
+    while retries > 0:
+        try:
+            engine = make_engine(Config.DB_PATH)
+            logger.info(f"Engine создан для {Config.DB_PATH}")
+
+            init_db(engine)
+            logger.info("init_db выполнен (drop_all + create_all)")
+
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+            logger.info(f"Таблицы после init_db: {tables}")
+
+            with Session(engine) as sess:
+                try:
+                    with open("INFO_FOR_DB/PROMOCODES/promocodes.txt", "r", encoding="utf-8") as f:
+                        codes = [line.strip() for line in f if line.strip().isdigit() and len(line.strip()) == 3]
+                    logger.info(f"Загружено {len(codes)} кодов из promocodes.txt")
+                except FileNotFoundError:
+                    logger.error("Файл promocodes.txt НЕ НАЙДЕН!")
+                    codes = []
+
+                seed_data(sess, anxiety_codes=codes)
+                sess.commit()
+                logger.info("seed_data + commit выполнен")
+
+            # Финальный чек
+            inspector = inspect(engine)
+            if not inspector.has_table("users") or not inspector.has_table("orders"):
+                logger.error("Критическая ошибка: таблицы НЕ созданы после init_db!")
+                raise RuntimeError("DB initialization failed - tables missing")
+
+            logger.info("DB проверена: все таблицы на месте.")
+            break
+
+        except Exception as e:
+            retries -= 1
+            logger.error(f"Ошибка инициализации DB (осталось попыток: {retries}): {e}")
+            await asyncio.sleep(5)
+
+    if retries == 0 or engine is None:
+        logger.critical("Не удалось инициализировать БД после 3 попыток — сервер НЕ запустится полностью!")
+        # Можно raise, чтобы uvicorn упал, но лучше продолжить с ошибкой
+        return
+
+    # Фоновые задачи
+    await asyncio.sleep(2)
+    asyncio.create_task(check_all_shipped_orders())
+    asyncio.create_task(check_pending_timeouts())
+    await check_channel_permissions()
+
+    # Установка webhook
     webhook_url = f"https://bot.rehy.ru{WEBHOOK_PATH}"
     await bot.set_webhook(
         url=webhook_url,
         secret_token=WEBHOOK_SECRET,
-        allowed_updates=dp.resolve_used_update_types(),  # только нужные типы обновлений
-        drop_pending_updates=True  # очистить очередь при старте
+        allowed_updates=dp.resolve_used_update_types(),
+        drop_pending_updates=True
     )
     webhook_info = await bot.get_webhook_info()
-    logger.info(
-        f"Current webhook info after set: {webhook_info.dict() if webhook_info else 'None'}")  # .dict() для print
-    if webhook_info.last_error_date:
-        logger.error(
-            f"Last TG webhook error: date={webhook_info.last_error_date}, msg={webhook_info.last_error_message}")
-    if webhook_info.pending_update_count > 0:
-        logger.warning(f"Pending updates: {webhook_info.pending_update_count} - TG queue stuck?")
-    logger.info(f"Telegram webhook успешно установлен: {webhook_url}")
+    logger.info(f"Webhook установлен: {webhook_url}")
+    logger.info(f"Webhook info: {webhook_info.dict() if webhook_info else 'None'}")
+
+    logger.info("=== FastAPI Startup завершён успешно ===")
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Telegram webhook удалён при остановке")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
