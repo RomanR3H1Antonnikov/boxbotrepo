@@ -29,6 +29,7 @@ def get_or_create_user(session: Session, telegram_id: int, username: str | None 
         if username and user.username != username:
             user.username = username
         user.updated_at = datetime.now(timezone.utc)
+    session.refresh(user)
     return user
 
 
@@ -69,7 +70,10 @@ def update_user_state(session: Session, user: User):
 
 
 def get_user_by_id(session: Session, telegram_id: int) -> User | None:
-    return session.get(User, telegram_id)
+    user = session.get(User, telegram_id)
+    if user:
+        session.refresh(user)
+    return user
 
 
 def create_order_db(session: Session, user_id: int, **kwargs) -> Order:

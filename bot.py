@@ -3806,7 +3806,6 @@ def kb_pvz_list(pvz_list: List[dict]) -> InlineKeyboardMarkup:
 last_status_cache: Dict[int, str] = {}  # order_id → status_text
 
 async def check_all_shipped_orders():
-    from sqlalchemy import inspect  # импортируем здесь
     engine = make_engine(Config.DB_PATH)  # свежий engine
 
     await asyncio.sleep(5)  # Дай 5 сек на init_db (если гонка)
@@ -4052,26 +4051,44 @@ async def main():
     logger.info("Бот запущен в режиме WEBHOOK")
     logger.info("BOT VERSION MARK: 2026-01-29 FINAL (webhook)")
 
-    engine = make_engine(Config.DB_PATH)
-    init_db(engine)
-
-    from sqlalchemy import inspect
-    inspector = inspect(engine)
-    tables = inspector.get_table_names()
-    logger.info(f"Таблицы после init_db: {tables}")
-
-    # Засеиваем данные (промокоды и т.д.)
-    with Session(engine) as sess:
+    retries = 3  # Добавь: количество попыток
+    while retries > 0:
         try:
-            with open("INFO_FOR_DB/PROMOCODES/promocodes.txt", "r", encoding="utf-8") as f:
-                codes = [line.strip() for line in f if line.strip().isdigit() and len(line.strip()) == 3]
-            logger.info(f"Загружено {len(codes)} кодов из promocodes.txt")
-        except FileNotFoundError:
-            logger.error("Файл promocodes.txt НЕ НАЙДЕН!")
-            codes = []
+            engine = make_engine(Config.DB_PATH)
+            init_db(engine)
 
-        seed_data(sess, anxiety_codes=codes)
-        sess.commit()
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+            logger.info(f"Таблицы после init_db: {tables}")
+
+            # Засеиваем данные (промокоды и т.д.)
+            with Session(engine) as sess:
+                try:
+                    with open("INFO_FOR_DB/PROMOCODES/promocodes.txt", "r", encoding="utf-8") as f:
+                        codes = [line.strip() for line in f if line.strip().isdigit() and len(line.strip()) == 3]
+                    logger.info(f"Загружено {len(codes)} кодов из promocodes.txt")
+                except FileNotFoundError:
+                    logger.error("Файл promocodes.txt НЕ НАЙДЕН!")
+                    codes = []
+
+                seed_data(sess, anxiety_codes=codes)
+                sess.commit()
+
+            # После seed - чек таблиц (твой код)
+            inspector = inspect(engine)
+            if not inspector.has_table("users") or not inspector.has_table("orders"):
+                logger.error("Критическая ошибка: таблицы не созданы после init_db! Бот остановлен.")
+                return
+
+            logger.info("DB проверена: все таблицы на месте.")
+            break  # Успех - выходим из retry
+        except Exception as e:
+            retries -= 1
+            logger.error(f"Ошибка init DB (retry оставшихся: {retries}): {e}")
+            await asyncio.sleep(5)  # Ждём 5 сек перед следующей попыткой
+    if retries == 0:
+        logger.critical("Не удалось инициализировать DB после 3 попыток - бот остановлен.")
+        return  # Остановка на failure
 
     # Запускаем фоновые задачи
     await asyncio.sleep(5)  # даём время на инициализацию
