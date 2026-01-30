@@ -32,10 +32,9 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import uvicorn
+from fastapi import FastAPI, Request, HTTPException
 from aiogram.types import Update
+from starlette.middleware.base import BaseHTTPMiddleware
 
 app = FastAPI()
 
@@ -103,6 +102,18 @@ logger.info(f"CDEK_PROD_ACCOUNT загружен: {'Да (непустой)' if 
 logger.info(f"CDEK_PROD_PASSWORD загружен: {'Да (непустой)' if prod_password.strip() else 'НЕТ или пустой'} | Длина: {len(prod_password)}")
 Configuration.account_id = os.getenv("YOOKASSA_SHOP_ID")
 Configuration.secret_key = os.getenv("YOOKASSA_SECRET_KEY")
+
+
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        logger.info(f"Incoming request: {request.method} {request.url} from IP {request.client.host}")
+        logger.debug(f"Headers: {request.headers}")
+        response = await call_next(request)
+        logger.info(f"Response status: {response.status_code}")
+        return response
+
+
+app.add_middleware(LoggingMiddleware)
 
 # Проверяем, что ключи загрузились
 if not Configuration.account_id or not Configuration.secret_key:
@@ -4056,19 +4067,23 @@ async def main():
     asyncio.create_task(check_pending_timeouts())
     await check_channel_permissions()
 
-    # Устанавливаем webhook при старте
-    await on_startup()
+    if Config.USE_WEBHOOK:
+        # Устанавливаем webhook при старте
+        await on_startup()
 
-    # Запускаем единый сервер
-    port = int(os.getenv("WEBHOOK_PORT", 8000))
-    config = uvicorn.Config(
-        app,
-        host="0.0.0.0",
-        port=port,
-        log_level="info",
-        workers=1  # для начала 1, потом можно увеличить
-    )
-    server = uvicorn.Server(config)
+        # Запускаем единый сервер
+        port = int(os.getenv("WEBHOOK_PORT", 8000))
+        config = uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=port,
+            log_level="info",
+            workers=1  # для начала 1, потом можно увеличить
+        )
+        server = uvicorn.Server(config)
+    else:
+        logger.warning("Fallback to polling mode (set USE_WEBHOOK=False in .env)")
+        await dp.start_polling(bot)
 
     logger.info(f"Запускаю FastAPI на порту {port} (Telegram + YooKassa webhook)")
     await server.serve()
@@ -4077,10 +4092,8 @@ async def main():
 # ───────────────────────────────────────────────
 # WEBHOOK ОТ ЮKASSA (отдельный FastAPI сервер)
 # ───────────────────────────────────────────────
-from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 import uvicorn
-app = FastAPI(title="YooKassa Webhook")
 
 
 @app.post("/webhook/yookassa")
@@ -4181,19 +4194,28 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "fallback_secret_if_not_set")
 WEBHOOK_PATH = "/webhook/telegram"
 
 
-@app.post(WEBHOOK_PATH)  # "/webhook/telegram"
+@app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
+    logger.info(f"TG webhook attempt from IP: {request.client.host} | Headers: {dict(request.headers)}")
+
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        logger.warning("Invalid TG secret token!")
         raise HTTPException(status_code=403, detail="Invalid secret token")
 
     try:
         json_data = await request.json()
-        update = Update(**json_data)  # Парсим в aiogram Update
-        await dp.feed_update(bot, update)  # Кормим в Dispatcher (он обработает handlers)
+        logger.debug(f"TG webhook payload: {json_data}")
+
+        update = Update(**json_data)
+        await dp.feed_update(bot, update)
+        logger.info("TG update processed successfully")
         return {"ok": True}
+    except ValueError as ve:
+        logger.error(f"TG webhook JSON parse error: {ve}")
+        return {"ok": False}
     except Exception as e:
-        logger.exception(f"Ошибка в Telegram webhook: {e}")
-        return {"ok": False}  # TG ожидает 200, даже при ошибке
+        logger.exception(f"TG webhook critical error: {e}")
+        return {"ok": False}
 
 
 @app.on_event("startup")
@@ -4205,6 +4227,10 @@ async def on_startup():
         allowed_updates=dp.resolve_used_update_types(),  # только нужные типы обновлений
         drop_pending_updates=True  # очистить очередь при старте
     )
+    webhook_info = await bot.get_webhook_info()
+    logger.info(f"Current webhook info after set: {webhook_info}")
+    if webhook_info.url != webhook_url:
+        logger.error("Webhook set failed! Current URL mismatch.")
     logger.info(f"Telegram webhook успешно установлен: {webhook_url}")
 
 @app.on_event("shutdown")
