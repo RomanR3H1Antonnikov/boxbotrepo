@@ -4090,32 +4090,30 @@ async def main():
         logger.critical("Не удалось инициализировать DB после 3 попыток - бот остановлен.")
         return  # Остановка на failure
 
-    # Запускаем фоновые задачи
-    await asyncio.sleep(5)  # даём время на инициализацию
+    # Запускаем фоновые задачи ТОЛЬКО после успешной инициализации БД
+    await asyncio.sleep(2)  # маленький sleep, чтобы engine "устаканился"
     asyncio.create_task(check_all_shipped_orders())
     asyncio.create_task(check_pending_timeouts())
     await check_channel_permissions()
 
     if Config.USE_WEBHOOK:
-        # Устанавливаем webhook при старте
-        await on_startup()
+        await on_startup()  # webhook set
 
-        # Запускаем единый сервер
         port = int(os.getenv("WEBHOOK_PORT", 8000))
         config = uvicorn.Config(
             app,
             host="0.0.0.0",
             port=port,
             log_level="info",
-            workers=1  # для начала 1, потом можно увеличить
+            workers=1
         )
         server = uvicorn.Server(config)
-    else:
-        logger.warning("Fallback to polling mode (set USE_WEBHOOK=False in .env)")
-        await dp.start_polling(bot)
 
-    logger.info(f"Запускаю FastAPI на порту {port} (Telegram + YooKassa webhook)")
-    await server.serve()
+        logger.info(f"Запускаю FastAPI на порту {port} (Telegram + YooKassa webhook)")
+        await server.serve()  # ← сервер запускается только здесь, после БД
+    else:
+        logger.warning("Fallback to polling mode")
+        await dp.start_polling(bot)
 
 
 # ───────────────────────────────────────────────
