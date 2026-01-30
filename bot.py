@@ -17,7 +17,7 @@ from db.repo import (
     get_user_by_id,
     create_order_db, get_user_orders_db
 )
-from db.models import RedeemCode, RedeemUse
+from db.models import Base
 from db.models import Order
 from yookassa import Configuration, Payment
 from yookassa.domain.notification import WebhookNotification
@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from aiogram.types import Update
 from starlette.middleware.base import BaseHTTPMiddleware
+from sqlalchemy import inspect
 
 app = FastAPI()
 
@@ -127,6 +128,7 @@ if not Configuration.account_id or not Configuration.secret_key:
     logger.critical("!!! ЮKassa ключи НЕ ЗАГРУЗИЛИСЬ !!! Проверь .env")
 else:
     logger.info(f"ЮKassa подключена: shopId = {Configuration.account_id[:6]}...")
+
 
 # ========== CDEK: Получение токена ==========
 async def get_cdek_token() -> Optional[str]:
@@ -4104,6 +4106,7 @@ async def main():
 # ───────────────────────────────────────────────
 from fastapi.responses import JSONResponse
 import uvicorn
+
 
 
 @app.post("/webhook/yookassa")
