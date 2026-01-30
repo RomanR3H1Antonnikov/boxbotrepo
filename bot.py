@@ -4056,104 +4056,88 @@ import uvicorn
 
 @app.post("/webhook/yookassa")
 async def yookassa_webhook(request: Request):
-    logger.info(f"YooKassa webhook from IP: {request.client.host} | Headers: {dict(request.headers)}")
+    client_ip = request.client.host
+    logger.info(f"YooKassa webhook from IP: {client_ip} | Headers: {dict(request.headers)}")
 
-    payload = await request.json()
-    logger.debug(f"YooKassa payload: {payload}")
-
-    # Ищем подпись в любом регистре и под любым именем (работает и в тесте, и на проде)
-    signature = None
-    headers_lower = {k.lower(): v for k, v in request.headers.items()}
-
-    possible_names = [
-        "x-yookassa-signature",
-        "signature",
-        "yookassa-signature",
-    ]
-
-    for name in possible_names:
-        if name in headers_lower:
-            signature = headers_lower[name]
-            logger.info(f"Найдена подпись в заголовке '{name}'")
-            break
-
-    if not signature:
-        logger.error("Webhook без подписи! Ни один из возможных заголовков не найден.")
-        return JSONResponse(status_code=200, content={"ok": True})
+    # Быстрая защита: принимаем только от официальных IP ЮKассы
+    yookassa_ips = {"77.75.154.206", "77.75.153.78", "77.75.154.0/24", "77.75.153.0/24"}
+    if client_ip not in yookassa_ips and not any(client_ip.startswith(ip.split('/')[0]) for ip in yookassa_ips):
+        logger.warning(f"Webhook от неизвестного IP: {client_ip} — отклоняем")
+        return JSONResponse(status_code=403, content={"ok": False})
 
     try:
+        payload = await request.json()
+        logger.debug(f"YooKassa payload: {payload}")
+
         notification = WebhookNotification(payload)
+        event = notification.event
+        payment = notification.object
+
+        logger.info(f"Успешно распарсено уведомление: {event} | Payment ID: {payment.id}")
+
+        if event == "payment.succeeded":
+            order_id_str = payment.metadata.get("order_id")
+            if not order_id_str:
+                logger.error("В метаданных нет order_id!")
+                return JSONResponse(status_code=200, content={"ok": True})
+
+            try:
+                order_id = int(order_id_str)
+            except ValueError:
+                logger.error(f"Некорректный order_id в метаданных: {order_id_str}")
+                return JSONResponse(status_code=200, content={"ok": True})
+
+            engine = make_engine(Config.DB_PATH)
+            with Session(engine) as sess:
+                order = sess.get(Order, order_id)
+                if not order:
+                    logger.error(f"Заказ #{order_id} не найден по webhook")
+                    return JSONResponse(status_code=200, content={"ok": True})
+
+                # Защита от повторной обработки
+                if order.status in (OrderStatus.PAID_FULL.value, OrderStatus.SHIPPED.value, OrderStatus.ARCHIVED.value):
+                    logger.info(f"Заказ #{order_id} уже обработан, пропускаем")
+                    return JSONResponse(status_code=200, content={"ok": True})
+
+                # Обновляем статус
+                kind = payment.metadata.get("payment_kind", "unknown")
+                if kind == "full":
+                    order.payment_kind = "full"
+                    order.status = OrderStatus.PAID_FULL.value
+                elif kind == "pre":
+                    order.payment_kind = "pre"
+                    order.status = OrderStatus.PAID_PARTIALLY.value
+                elif kind == "rem":
+                    order.payment_kind = "remainder"
+                    order.status = OrderStatus.PAID_FULL.value
+                else:
+                    logger.warning(f"Неизвестный payment_kind: {kind}")
+
+                # Сохраняем payment_id
+                if not order.extra_data:
+                    order.extra_data = {}
+                order.extra_data["yookassa_payment_id"] = payment.id
+                flag_modified(order, "extra_data")
+
+                sess.commit()
+
+                # Уведомления
+                await notify_admins_payment_success(order.id)
+                await bot.send_message(
+                    order.user_id,
+                    f"✅ Оплата прошла успешно! Заказ <b>#{order.id}</b> принят в обработку.\n\n"
+                    f"Статус обновлён автоматически.",
+                    parse_mode="HTML",
+                    reply_markup=kb_order_status(order)
+                )
+
+                logger.info(f"Успешно обработан payment.succeeded для заказа #{order.id} → {order.status}")
+
+        return JSONResponse(status_code=200, content={"ok": True})
+
     except Exception as e:
-        logger.error(f"Ошибка создания WebhookNotification: {e}")
+        logger.exception("Критическая ошибка в yookassa_webhook")
         return JSONResponse(status_code=200, content={"ok": True})
-
-    if not notification.verify_signature(signature):
-        logger.error("Неверная подпись webhook! Проверь YOOKASSA_SECRET_KEY в .env")
-        return JSONResponse(status_code=200, content={"ok": True})
-
-    event = notification.event
-    payment = notification.object
-
-    logger.info(f"Успешно распарсено уведомление: {event} | Payment ID: {payment.id}")
-
-    if event == "payment.succeeded":
-        order_id_str = payment.metadata.get("order_id")
-        if not order_id_str:
-            logger.error("В метаданных нет order_id!")
-            return JSONResponse(status_code=200, content={"ok": True})
-
-        try:
-            order_id = int(order_id_str)
-        except ValueError:
-            logger.error(f"Некорректный order_id в метаданных: {order_id_str}")
-            return JSONResponse(status_code=200, content={"ok": True})
-
-        engine = make_engine(Config.DB_PATH)
-        with Session(engine) as sess:
-            order = sess.get(Order, order_id)
-            if not order:
-                logger.error(f"Заказ #{order_id} не найден по webhook")
-                return JSONResponse(status_code=200, content={"ok": True})
-
-            # Защита от повторной обработки
-            if order.status in (OrderStatus.PAID_FULL.value, OrderStatus.SHIPPED.value, OrderStatus.ARCHIVED.value):
-                logger.info(f"Заказ #{order_id} уже обработан, пропускаем")
-                return JSONResponse(status_code=200, content={"ok": True})
-
-            # Обновляем статус
-            kind = payment.metadata.get("payment_kind", "unknown")
-            if kind == "full":
-                order.payment_kind = "full"
-                order.status = OrderStatus.PAID_FULL.value
-            elif kind == "pre":
-                order.payment_kind = "pre"
-                order.status = OrderStatus.PAID_PARTIALLY.value
-            elif kind == "rem":
-                order.payment_kind = "remainder"
-                order.status = OrderStatus.PAID_FULL.value
-            else:
-                logger.warning(f"Неизвестный payment_kind: {kind}")
-
-            # Сохраняем payment_id
-            if not order.extra_data:
-                order.extra_data = {}
-            order.extra_data["yookassa_payment_id"] = payment.id
-            flag_modified(order, "extra_data")
-            sess.commit()
-
-            # Уведомления
-            await notify_admins_payment_success(order.id)
-            await bot.send_message(
-                order.user_id,
-                f"✅ Оплата прошла успешно! Заказ <b>#{order.id}</b> принят в обработку.\n\n"
-                f"Статус обновлён автоматически.",
-                parse_mode="HTML",
-                reply_markup=kb_order_status(order)
-            )
-
-            logger.info(f"Успешно обработан payment.succeeded для заказа #{order.id} → {order.status}")
-
-    return JSONResponse(status_code=200, content={"ok": True})
 
 
 # Секретный токен (придумай свой длинный, 32+ символов, сохрани в .env или здесь)
