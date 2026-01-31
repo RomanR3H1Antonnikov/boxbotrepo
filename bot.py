@@ -1280,9 +1280,8 @@ async def cmd_menu(message: Message):
     with Session(engine) as sess:
         user = get_user_by_id(sess, message.from_user.id)
         if user:
-            reset_states(user)
+            reset_states(user, sess)
             await message.answer("Все черновики заказов отменены. Если был незавершённый заказ - он отменён. Оплаченные заказы вы можете найти в Личном кабинете")
-            sess.commit()
     await message.answer("Выбери действие:", reply_markup=kb_main())
 
 @r.message(Command("admin_panel"))
@@ -1849,8 +1848,7 @@ async def cb_simple_navigation(cb: CallbackQuery):
         with Session(engine) as sess:
             user = get_user_by_id(sess, cb.from_user.id)
             if user:
-                reset_states(user)
-                sess.commit()
+                reset_states(user, sess)
         if data == "menu":
             await edit_or_send(cb.message, "Выбери действие:", kb_main())
         elif data == "gallery":
@@ -2483,8 +2481,7 @@ async def cb_gift_yes(cb: CallbackQuery):
 
         if not order or order.status != OrderStatus.NEW.value:
             await cb.answer("Заказ устарел. Начните оформление заново.", show_alert=True)
-            reset_states(user)
-            sess.commit()
+            reset_states(user, sess)
             return
 
         if not order:
@@ -2539,8 +2536,7 @@ async def cb_gift_no(cb: CallbackQuery):
     with Session(engine) as sess:  # новая сессия для безопасности
         user = get_user_by_id(sess, cb.from_user.id)
         if user:
-            reset_states(user)
-            sess.commit()
+            reset_states(user, sess)
 
     await cb.message.answer("Ок, без послания. Переходим к оплате...")
 
@@ -2827,8 +2823,7 @@ async def cb_pvz_confirm(cb: CallbackQuery):
         user.awaiting_pvz_address = False
         user.temp_pvz_list = None
         user.temp_selected_pvz = None
-        reset_states(user)
-        sess.commit()
+        reset_states(user, sess)
 
         await edit_or_send(
             cb.message,
@@ -4083,8 +4078,7 @@ async def handle_payment_success(message: Message):
 
             user = get_user_by_id(sess, message.from_user.id)
             if user:
-                reset_states(user)
-                sess.commit()  # ← commit обязателен!
+                reset_states(user, sess)
                 logger.info(
                     f"Состояния пользователя {user.telegram_id} "
                     f"сброшены после подтверждения оплаты заказа #{order.id}"
@@ -4178,8 +4172,7 @@ async def yookassa_webhook(request: Request):
                 # Сброс состояний пользователя после успешной оплаты
                 user = get_user_by_id(sess, order.user_id)
                 if user:
-                    reset_states(user)
-                    sess.commit()
+                    reset_states(user, sess)
                     logger.info(f"Состояния пользователя {user.telegram_id} сброшены после оплаты заказа #{order.id}")
 
                 # Уведомления
