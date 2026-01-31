@@ -684,28 +684,43 @@ def validate_address(address: str) -> tuple[bool, str]:
     return True, "Адрес валиден."
 
 
-def reset_states(user):
-    # Сбрасываем ВСЕ awaiting флаги — без исключений, чтобы избежать зависаний
-    user.awaiting_redeem_code = False
-    user.awaiting_auth = False
-    user.awaiting_gift_message = False
-    user.awaiting_pvz_address = False
-    user.awaiting_manual_pvz = False
-    user.awaiting_manual_track = False
-    user.pvz_for_order_id = None
-    user.temp_gift_order_id = None
-    user.temp_pvz_list = None
-    user.temp_selected_pvz = None
-    user.temp_order_id_for_track = None
-    # Abandon unfinished NEW orders
-    engine = make_engine(Config.DB_PATH)
-    with Session(engine) as sess:
-        orders = get_user_orders_db(sess, user.telegram_id)
+def reset_states(user, session: Session = None):
+    """
+    session — опционально, если передана — используем её, иначе создаём новую
+    """
+    close_session = False
+    if session is None:
+        engine = make_engine(Config.DB_PATH)
+        session = Session(engine)
+        close_session = True
+
+    try:
+        # Сбрасываем флаги
+        user.awaiting_redeem_code = False
+        user.awaiting_auth = False
+        user.awaiting_gift_message = False
+        user.awaiting_pvz_address = False
+        user.awaiting_manual_pvz = False
+        user.awaiting_manual_track = False
+        user.pvz_for_order_id = None
+        user.temp_gift_order_id = None
+        user.temp_pvz_list = None
+        user.temp_selected_pvz = None
+        user.temp_order_id_for_track = None
+
+        # Abandon unfinished NEW orders — используем ту же сессию!
+        orders = get_user_orders_db(session, user.telegram_id)
         for o in orders:
             if o.status == OrderStatus.NEW.value:
-                o = sess.merge(o)
+                o = session.merge(o)
                 o.status = OrderStatus.ABANDONED.value
-        sess.commit()
+
+        session.commit()
+        logger.info(f"Состояния пользователя {user.telegram_id} сброшены")
+
+    finally:
+        if close_session:
+            session.close()
 
 
 # ======== ADMIN HELPERS ========
@@ -2422,8 +2437,7 @@ async def cb_pvz_select(cb: CallbackQuery):
         user.awaiting_pvz_address = False
         user.temp_pvz_list = None
         user.temp_selected_pvz = None
-        reset_states(user)  # на всякий случай сбрасываем всё
-        sess.commit()
+        reset_states(user, sess)  # на всякий случай сбрасываем всё
 
     # UI outside
     await edit_or_send(
@@ -2481,9 +2495,8 @@ async def cb_gift_yes(cb: CallbackQuery):
             await cb.answer("Вы уже вводите послание", show_alert=True)
             return
 
-        reset_states(user)  # на всякий случай чистим все флаги
+        reset_states(user, sess)  # на всякий случай чистим все флаги
         user.awaiting_gift_message = True
-        sess.commit()
 
     await cb.message.edit_text(
         "✍️ Напишите текст послания (до 300 символов):",
@@ -2680,8 +2693,7 @@ async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: st
 
         user = get_user_by_id(sess, msg.chat.id)
         if user:
-            reset_states(user)
-            sess.commit()
+            reset_states(user, sess)
             logger.info(f"Состояния пользователя {user.telegram_id} сброшены перед показом клавиатуры оплаты заказа #{order.id}")
 
     # Отправка сообщения уже вне сессии
