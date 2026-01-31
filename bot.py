@@ -2419,6 +2419,12 @@ async def cb_pvz_select(cb: CallbackQuery):
 
         sess.commit()
 
+        user.awaiting_pvz_address = False
+        user.temp_pvz_list = None
+        user.temp_selected_pvz = None
+        reset_states(user)  # на всякий случай сбрасываем всё
+        sess.commit()
+
     # UI outside
     await edit_or_send(
         cb.message,
@@ -2475,6 +2481,7 @@ async def cb_gift_yes(cb: CallbackQuery):
             await cb.answer("Вы уже вводите послание", show_alert=True)
             return
 
+        reset_states(user)  # на всякий случай чистим все флаги
         user.awaiting_gift_message = True
         sess.commit()
 
@@ -2515,6 +2522,12 @@ async def cb_gift_no(cb: CallbackQuery):
 
         # Проверяем, есть ли валидный заказ
         has_valid_order = order_id is not None
+
+    with Session(engine) as sess:  # новая сессия для безопасности
+        user = get_user_by_id(sess, cb.from_user.id)
+        if user:
+            reset_states(user)
+            sess.commit()
 
     await cb.message.answer("Ок, без послания. Переходим к оплате...")
 
@@ -2665,6 +2678,12 @@ async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: st
 
         sess.commit()  # финальный коммит всех изменений
 
+        user = get_user_by_id(sess, msg.chat.id)
+        if user:
+            reset_states(user)
+            sess.commit()
+            logger.info(f"Состояния пользователя {user.telegram_id} сброшены перед показом клавиатуры оплаты заказа #{order.id}")
+
     # Отправка сообщения уже вне сессии
     text = "\n".join(text_lines)
     await msg.answer(
@@ -2791,6 +2810,12 @@ async def cb_pvz_confirm(cb: CallbackQuery):
                 "delivery_period": period_text,
             }
         )
+        sess.commit()
+
+        user.awaiting_pvz_address = False
+        user.temp_pvz_list = None
+        user.temp_selected_pvz = None
+        reset_states(user)
         sess.commit()
 
         await edit_or_send(
@@ -4044,6 +4069,15 @@ async def handle_payment_success(message: Message):
             flag_modified(order, "extra_data")
             sess.commit()
 
+            user = get_user_by_id(sess, message.from_user.id)
+            if user:
+                reset_states(user)
+                sess.commit()  # ← commit обязателен!
+                logger.info(
+                    f"Состояния пользователя {user.telegram_id} "
+                    f"сброшены после подтверждения оплаты заказа #{order.id}"
+                )
+
         except Exception as e:
             logger.exception("Ошибка проверки статуса платежа в ЮKассе")
             await notify_admin(f"Ошибка проверки платежа заказа #{order_id}: {e}")
@@ -4127,6 +4161,14 @@ async def yookassa_webhook(request: Request):
                 flag_modified(order, "extra_data")
 
                 sess.commit()
+
+                # В конец функции yookassa_webhook (внутри try, после sess.commit() где обновляется статус заказа)
+                # Сброс состояний пользователя после успешной оплаты
+                user = get_user_by_id(sess, order.user_id)
+                if user:
+                    reset_states(user)
+                    sess.commit()
+                    logger.info(f"Состояния пользователя {user.telegram_id} сброшены после оплаты заказа #{order.id}")
 
                 # Уведомления
                 await notify_admins_payment_success(order.id)
