@@ -430,7 +430,7 @@ dp.include_router(r)
 CODE_RE = re.compile(r"^\d{3}$")
 
 
-async def create_yookassa_payment(order: Order, amount_rub: int, description: str, return_url: str) -> dict:
+async def create_yookassa_payment(order: Order, amount_rub: int, description: str, return_url: str, kind: Optional[str] = None) -> dict:
     lock = get_payment_lock(order.id)
     async with lock:
         try:
@@ -487,7 +487,7 @@ async def create_yookassa_payment(order: Order, amount_rub: int, description: st
                 "metadata": {
                     "order_id": str(order.id),
                     "user_id": str(order.user_id),
-                    "payment_kind": order.payment_kind or "unknown"
+                    "payment_kind": kind or "unknown"  # ← ИЗМЕНИ на это (теперь kind передаётся явно)
                 },
                 "receipt": receipt
             })
@@ -2572,10 +2572,11 @@ async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: st
         if kind is None:
             # Полная оплата
             full_payment = await create_yookassa_payment(
-                order=order,
+                order=order_or_id,
                 amount_rub=total_rub,
                 description=f"Полная оплата заказа #{order.id} — Коробочка «Отпусти тревогу»",
-                return_url=f"{base_return_url}&kind=full"
+                return_url=f"{base_return_url}&kind=full",
+                kind="full"
             )
             if full_payment and full_payment["confirmation_url"]:
                 buttons.append([{
@@ -2587,10 +2588,11 @@ async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: st
 
             # Предоплата
             pre_payment = await create_yookassa_payment(
-                order=order,
+                order=order_or_id,
                 amount_rub=prepay_rub,
                 description=f"Предоплата 30% заказа #{order.id} — Коробочка «Отпусти тревогу»",
-                return_url=f"{base_return_url}&kind=pre"
+                return_url=f"{base_return_url}&kind=pre",
+                kind="pre"
             )
             if pre_payment and pre_payment["confirmation_url"]:
                 buttons.append([{
@@ -2633,10 +2635,11 @@ async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: st
                 return
 
             payment = await create_yookassa_payment(
-                order=order,
+                order=order_or_id,
                 amount_rub=amount_rub,
                 description=description,
-                return_url=f"{base_return_url}&kind={kind}"
+                return_url=f"{base_return_url}&kind={kind}",
+                kind=kind
             )
 
             if payment and payment["confirmation_url"]:
