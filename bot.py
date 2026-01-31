@@ -2534,13 +2534,17 @@ async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: st
     engine = make_engine(Config.DB_PATH)
 
     with Session(engine) as sess:
-        # Если передали объект — берём его ID и перезагружаем свежий из базы
-        if isinstance(order_or_id, Order):
-            order_id = order_or_id.id
-            order = sess.get(Order, order_id)
+        # Приводим к объекту Order в любом случае
+        if isinstance(order_or_id, int):
+            order = sess.get(Order, order_or_id)
+            if not order:
+                await msg.answer("Заказ не найден. Попробуйте начать заново.")
+                return
         else:
-            order_id = order_or_id
-            order = sess.get(Order, order_id)
+            order = order_or_id   # уже объект
+
+        # Теперь order — всегда объект Order
+        order_id = order.id
 
         if not order:
             await msg.answer("Заказ не найден. Попробуйте начать заново.")
@@ -2572,7 +2576,7 @@ async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: st
         if kind is None:
             # Полная оплата
             full_payment = await create_yookassa_payment(
-                order=order_or_id,
+                order=order,
                 amount_rub=total_rub,
                 description=f"Полная оплата заказа #{order.id} — Коробочка «Отпусти тревогу»",
                 return_url=f"{base_return_url}&kind=full",
@@ -2588,7 +2592,7 @@ async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: st
 
             # Предоплата
             pre_payment = await create_yookassa_payment(
-                order=order_or_id,
+                order=order,
                 amount_rub=prepay_rub,
                 description=f"Предоплата 30% заказа #{order.id} — Коробочка «Отпусти тревогу»",
                 return_url=f"{base_return_url}&kind=pre",
@@ -2635,7 +2639,7 @@ async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: st
                 return
 
             payment = await create_yookassa_payment(
-                order=order_or_id,
+                order=order,
                 amount_rub=amount_rub,
                 description=description,
                 return_url=f"{base_return_url}&kind={kind}",
