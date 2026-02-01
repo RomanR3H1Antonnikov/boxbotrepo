@@ -2518,34 +2518,25 @@ async def cb_gift_no(cb: CallbackQuery):
         order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
 
         if order:
-            order = sess.merge(order)  # Attach
+            order = sess.merge(order)
             if order.extra_data is None:
                 order.extra_data = {}
             if "gift_message" not in order.extra_data:
                 order.extra_data["gift_message"] = "Без послания"
             flag_modified(order, "extra_data")
 
-            order_id = order.id  # ← сохраняем только ID !
+            order_id = order.id
 
         user.awaiting_gift_message = False
         sess.commit()
 
-        # Проверяем, есть ли валидный заказ
-        has_valid_order = order_id is not None
-
-    with Session(engine) as sess:  # новая сессия для безопасности
-        user = get_user_by_id(sess, cb.from_user.id)
-        if user:
-            reset_states(user, sess)
-
     await cb.message.answer("Ок, без послания. Переходим к оплате...")
 
-    if has_valid_order:
-        # Передаём ТОЛЬКО ID, а не объект!
+    if order_id:
         await send_payment_keyboard(cb.message, order_or_id=order_id, kind=None)
     else:
         await cb.message.answer(
-            "Заказ не найден или уже оплачен. Начните оформление заново.",
+            "Заказ не найден. Начните оформление заново.",
             reply_markup=kb_main()
         )
 
