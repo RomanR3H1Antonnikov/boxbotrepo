@@ -2435,7 +2435,6 @@ async def cb_pvz_select(cb: CallbackQuery):
         user.awaiting_pvz_address = False
         user.temp_pvz_list = None
         user.temp_selected_pvz = None
-        reset_states(user, sess)  # на всякий случай сбрасываем всё
 
     # UI outside
     await edit_or_send(
@@ -2575,6 +2574,19 @@ async def send_payment_keyboard(msg: Message, order_or_id: Order | int, kind: st
             if "pending_payments" not in order.extra_data:
                 order.extra_data["pending_payments"] = {}
             flag_modified(order, "extra_data")
+
+        if order.status == OrderStatus.ABANDONED.value:
+            await msg.answer(
+                "Этот черновик заказа был отменён (возможно, из-за предыдущей попытки). Начните оформление заново.",
+                reply_markup=kb_main()
+            )
+            return
+        elif order.status not in (OrderStatus.NEW.value, OrderStatus.PENDING_PAYMENT.value):
+            await msg.answer(
+                f"Заказ #{order.id} находится в статусе '{order.status}' — оплата невозможна.",
+                reply_markup=kb_main()
+            )
+            return
 
         # Получаем username бота ОДИН РАЗ внутри сессии
         bot_info = await bot.get_me()
