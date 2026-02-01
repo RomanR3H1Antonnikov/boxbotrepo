@@ -2470,36 +2470,32 @@ async def cb_gift_yes(cb: CallbackQuery):
             await cb.answer("Ошибка доступа", show_alert=True)
             return
 
-        # FIX: ищем последний NEW-заказ пользователя
         orders = get_user_orders_db(sess, cb.from_user.id)
         order = next((o for o in reversed(orders or []) if o.status == OrderStatus.NEW.value), None)
         if not order:
             await cb.answer("Нет активного заказа", show_alert=True)
             return
-        order = sess.merge(order)  # ← обязательно attach, если order из get_user_orders_db
+
+        order = sess.merge(order)
 
         if not order or order.status != OrderStatus.NEW.value:
             await cb.answer("Заказ устарел. Начните оформление заново.", show_alert=True)
-            reset_states(user, sess)
             return
 
-        if not order:
-            await cb.answer("Нет активного заказа", show_alert=True)
-            return
+        user.awaiting_pvz_address = False
+        user.awaiting_manual_pvz = False
 
-        if user.awaiting_gift_message:
-            await cb.answer("Вы уже вводите послание", show_alert=True)
-            return
-
-        reset_states(user, sess)  # на всякий случай чистим все флаги
+        # Устанавливаем новый флаг
         user.awaiting_gift_message = True
+
+        sess.commit()
 
     await cb.message.edit_text(
         "✍️ Напишите текст послания (до 300 символов):",
         reply_markup=create_inline_keyboard([[{"text": "Отмена", "callback_data": "gift:cancel"}]])
     )
     await cb.answer()
-
+    
 
 @r.callback_query(F.data == "gift:no")
 async def cb_gift_no(cb: CallbackQuery):
