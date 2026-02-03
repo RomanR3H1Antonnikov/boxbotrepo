@@ -17,7 +17,6 @@ from db.repo import (
     get_user_by_id,
     create_order_db, get_user_orders_db
 )
-from db.models import Base
 from db.models import Order
 from yookassa import Configuration, Payment
 from yookassa.domain.notification import WebhookNotification
@@ -172,13 +171,14 @@ async def get_cdek_prod_token() -> Optional[str]:
         return None
     url = "https://api.cdek.ru/v2/oauth/token"  # прод!
     data = {"grant_type": "client_credentials", "client_id": account, "client_secret": password}
+    response = None
     try:
         response = await asyncio.to_thread(requests.post, url, data=data, timeout=15)
         if response.status_code == 200:
             return response.json().get("access_token")
     except Exception as e:
         logger.error(f"Ошибка получения прод-токена: {e}")
-        if 'response' in locals():
+        if response:
             logger.error(f"Ответ: {response.status_code} {response.text}")
         return None
 
@@ -430,6 +430,18 @@ dp.include_router(r)
 CODE_RE = re.compile(r"^\d{3}$")
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
+    handlers=[
+        logging.handlers.RotatingFileHandler(
+            "bot.log", maxBytes=10*1024*1024, backupCount=5
+        ),
+        logging.StreamHandler()
+    ]
+)
+
+
 async def create_yookassa_payment(order: Order, amount_rub: int, description: str, return_url: str, kind: Optional[str] = None) -> dict:
     lock = get_payment_lock(order.id)
     async with lock:
@@ -456,7 +468,7 @@ async def create_yookassa_payment(order: Order, amount_rub: int, description: st
             receipt = {
                 "customer": {
                     "email": user.email or "noemail@example.com",
-                    "phone": user.phone.replace("+", "") if user.phone else None
+                    "phone": user.phone.replace("+", "") if user.phone else None  # type: ignore
                 },
                 "items": [
                     {
@@ -487,7 +499,7 @@ async def create_yookassa_payment(order: Order, amount_rub: int, description: st
                 "metadata": {
                     "order_id": str(order.id),
                     "user_id": str(order.user_id),
-                    "payment_kind": kind or "unknown"  # ← ИЗМЕНИ на это (теперь kind передаётся явно)
+                    "payment_kind": kind or "unknown"
                 },
                 "receipt": receipt
             })
@@ -565,7 +577,7 @@ async def create_cdek_order(order_id: int) -> bool:
         "recipient": {
             "name": user.full_name,
             "phones": [{
-                "number": user.phone.replace("+", "").replace(" ", "").replace("-", "")
+                "number": user.phone.replace("+", "").replace(" ", "").replace("-", "")  # type: ignore[attr-defined]
             }],
         },
 
@@ -1983,6 +1995,7 @@ async def cb_orders_list(cb: CallbackQuery):
 
 @r.callback_query(F.data.startswith("change_addr:"))
 async def cb_change_addr(cb: CallbackQuery):
+    oid = None
     try:
         oid = int(cb.data.split(":")[1])
 
@@ -2121,6 +2134,7 @@ async def cb_admin_orders_archived(cb: CallbackQuery):
 @r.callback_query(F.data.startswith("admin:order:"))
 async def cb_admin_order_details(cb: CallbackQuery):
     logger.info(f"Order details callback: user_id={cb.from_user.id}, data={cb.data}")
+    oid = None
     try:
         oid = int(cb.data.split(":")[2])
 
@@ -2153,6 +2167,7 @@ async def cb_admin_order_details(cb: CallbackQuery):
 @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_ASSEMBLED.value))
 async def cb_admin_set_assembled(cb: CallbackQuery):
     logger.info(f"Set assembled callback: user_id={cb.from_user.id}, data={cb.data}")
+    oid = None
     try:
         oid = int(cb.data.split(":")[2])
 
@@ -2184,6 +2199,7 @@ async def cb_admin_set_assembled(cb: CallbackQuery):
 @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_SHIPPED.value))
 async def cb_admin_set_shipped(cb: CallbackQuery):
     logger.info(f"Set shipped callback: user_id={cb.from_user.id}, data={cb.data}")
+    oid = None
     try:
         oid = int(cb.data.split(":")[2])
 
@@ -2220,6 +2236,7 @@ async def cb_admin_set_shipped(cb: CallbackQuery):
 @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_ARCHIVED.value))
 async def cb_admin_set_archived(cb: CallbackQuery):
     logger.info(f"Set archived callback: user_id={cb.from_user.id}, data={cb.data}")
+    oid = None  # Initialize
     try:
         oid = int(cb.data.split(":")[2])
 
@@ -2242,10 +2259,9 @@ async def cb_admin_set_archived(cb: CallbackQuery):
 
         await edit_or_send(cb.message, f"Заказ #{oid} заархивирован.", kb_admin_panel())
         await cb.answer()
-
     except Exception as e:
         logger.error(f"Admin set archived error: {e}")
-        await notify_admin(f"❌ Ошибка архивирования заказа #{oid if 'oid' in locals() else 'неизвестный'}")
+        await notify_admin(f"❌ Ошибка архивирования заказа #{oid if oid else 'неизвестный'}")
         await cb.answer("Ошибка", show_alert=True)
 
 
@@ -3672,7 +3688,7 @@ def filter_pvz_by_distance(pvz_list: List[dict], max_distance_m: int = 6000) -> 
             filtered.append(pvz)
     return filtered
 
-async def find_best_pvz(address_query: str, city: str = None, limit: int = 12) -> List[dict]:
+async def find_best_pvz(address_query: str, limit: int = 12) -> List[dict]:
     """
     Основная функция поиска ПВЗ:
     - Пытается определить город через API
@@ -3938,13 +3954,10 @@ async def check_all_shipped_orders():
                         f"СДЭК: #{order.id} → {current_status_desc}\n"
                         f"Трек: {order.track}"
                     )
-
             logger.info(f"Проверка статусов завершена. Проверено заказов: {len(orders_to_check)}")
-
-        except Exception as e:
+        except (ValueError, KeyError, requests.RequestException) as e:  # Уточнили broad except
             logger.exception(f"КРИТИЧНАЯ ошибка в check_all_shipped_orders: {e}")
             await notify_admin(f"ОШИБКА в фоновой задаче СДЭК:\n{e}")
-
         # Проверяем каждые 2-3 минуты в первые 2 часа после создания, потом реже - но пока просто 5 минут
         await asyncio.sleep(300)  # 5 минут - оптимально
 
@@ -4096,8 +4109,6 @@ async def handle_payment_success(message: Message):
 # WEBHOOK ОТ ЮKASSA (отдельный FastAPI сервер)
 # ───────────────────────────────────────────────
 from fastapi.responses import JSONResponse
-import uvicorn
-
 
 
 @app.post("/webhook/yookassa")
@@ -4188,7 +4199,7 @@ async def yookassa_webhook(request: Request):
 
         return JSONResponse(status_code=200, content={"ok": True})
 
-    except Exception as e:
+    except Exception:
         logger.exception("Критическая ошибка в yookassa_webhook")
         return JSONResponse(status_code=200, content={"ok": True})
 
