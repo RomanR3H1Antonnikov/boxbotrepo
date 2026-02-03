@@ -95,13 +95,10 @@ STREET_KEYWORDS = [
 CDEK_ACCOUNT = os.getenv("CDEK_ACCOUNT")
 CDEK_SECURE_PASSWORD = os.getenv("CDEK_SECURE_PASSWORD")
 
-# Логируем сразу при старте — чтобы видеть, загрузились ли ключи
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(name)s | %(message)s'
-)
 logger = logging.getLogger("box_bot")
+
 logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+logging.getLogger("uvicorn").setLevel(logging.WARNING)  # Меньше uvicorn spam
 
 prod_account = os.getenv("CDEK_PROD_ACCOUNT") or ""
 prod_password = os.getenv("CDEK_PROD_PASSWORD") or ""
@@ -430,8 +427,16 @@ dp.include_router(r)
 CODE_RE = re.compile(r"^\d{3}$")
 
 
+class NoTGWebhookFilter(logging.Filter):
+    def filter(self, record):
+        # Не логируем каждый TG webhook (только errors)
+        if "TG webhook attempt" in record.msg and record.levelno < logging.WARNING:
+            return False
+        return True
+
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Изменить на WARNING (меньше info)
     format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
     handlers=[
         logging.handlers.RotatingFileHandler(
@@ -440,6 +445,8 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+logger.addFilter(NoTGWebhookFilter())
 
 
 async def create_yookassa_payment(order: Order, amount_rub: int, description: str, return_url: str, kind: Optional[str] = None) -> dict:
@@ -1929,7 +1936,9 @@ async def cb_pay(cb: CallbackQuery):
             await cb.answer("Заказ не найден", show_alert=True)
             return
 
-        if order.status not in (OrderStatus.NEW.value, OrderStatus.PAID_PARTIALLY.value):
+        # В cb_pay, после получения order
+        if order.status not in (OrderStatus.NEW.value, OrderStatus.PAID_PARTIALLY.value) and \
+                not (kind == "rem" and order.status == OrderStatus.ASSEMBLED.value and order.payment_kind == "pre"):
             await cb.answer("Оплата уже завершена или невозможна", show_alert=True)
             return
 
