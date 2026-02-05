@@ -1134,21 +1134,27 @@ def kb_ready_message(order: Order) -> InlineKeyboardMarkup:
 def kb_order_status(order: Order) -> InlineKeyboardMarkup:
     buttons = []
 
-    # Отслеживание
+    # Отслеживание — всегда, если есть трек
     if order.track:
         buttons.append([{
             "text": "Отследить посылку",
             "url": f"https://www.cdek.ru/ru/tracking?order_id={order.track}"
         }])
 
-    # Дооплата — только если предоплата и собран
-    if order.status == OrderStatus.ASSEMBLED.value and order.payment_kind == "pre":
+    show_remainder = (
+        order.payment_kind == "pre" and
+        order.status in (OrderStatus.PAID_PARTIALLY.value, OrderStatus.ASSEMBLED.value) and
+        (order.remainder_amount or 0) > 0
+    )
+
+    if show_remainder:
         remainder_rub = (order.total_price_kop // 100) - (order.total_price_kop * Config.PREPAY_PERCENT // 10000)
         buttons.append([{
             "text": f"Оплатить остаток ({remainder_rub} ₽)",
             "callback_data": f"pay:rem:{order.id}"
         }])
 
+    # Всегда показываем информацию о заказе и меню
     buttons.append([{"text": "Информация о заказе", "callback_data": f"order:{order.id}"}])
     buttons.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
 
@@ -4260,9 +4266,17 @@ async def yookassa_webhook(request: Request):
                 elif kind == "pre":
                     order.payment_kind = "pre"
                     order.status = OrderStatus.PAID_PARTIALLY.value
-                elif kind == "rem":
+                if kind == "rem":
                     order.payment_kind = "remainder"
                     order.status = OrderStatus.PAID_FULL.value
+
+                    # Если заказ уже был собран до дооплаты — сразу переводим в to_ship
+                    if order.status == OrderStatus.ASSEMBLED.value:  # был собран раньше
+                        # ничего не делаем — он уже assembled → будет виден в "Готовые к отправке"
+                        pass
+                    else:
+                        # Если ещё не собран — оставляем paid_full (ждём сборки)
+                        pass
                 else:
                     logger.warning(f"Неизвестный payment_kind: {kind}")
 
