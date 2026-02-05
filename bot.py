@@ -3,6 +3,7 @@ import re
 import asyncio
 import logging
 import logging.config
+import sys
 import requests
 from pathlib import Path
 from collections import defaultdict
@@ -40,7 +41,7 @@ from sqlalchemy import inspect
 
 LOG_CONFIG = {
     'version': 1,
-    'disable_existing_loggers': False,  # Ключевой: не отключать наши loggers
+    'disable_existing_loggers': False,
     'formatters': {
         'standard': {
             'format': '%(asctime)s | %(levelname)s | %(name)s | %(message)s'
@@ -53,42 +54,43 @@ LOG_CONFIG = {
             'maxBytes': 10 * 1024 * 1024,
             'backupCount': 5,
             'formatter': 'standard',
-            'level': logging.WARNING,
+            'level': 'DEBUG',  # ← временно DEBUG, чтобы видеть всё
         },
         'console': {
             'class': 'logging.StreamHandler',
+            'stream': sys.stdout,
             'formatter': 'standard',
-            'level': logging.WARNING,
+            'level': 'DEBUG',
         },
     },
     'loggers': {
-        '': {  # root logger
+        '': {  # root
             'handlers': ['file', 'console'],
-            'level': logging.WARNING,
+            'level': 'DEBUG',
             'propagate': True,
+        },
+        'box_bot': {
+            'handlers': ['file', 'console'],
+            'level': 'DEBUG',
+            'propagate': False,
         },
         'uvicorn': {
-            'handlers': ['file', 'console'],
-            'level': logging.WARNING,
-            'propagate': True,
+            'handlers': ['console'],  # uvicorn пусть пишет только в stdout
+            'level': 'INFO',
+            'propagate': False,
         },
-        'uvicorn.error': {
-            'level': logging.WARNING,
-            'propagate': True,
-        },
-        'uvicorn.access': {
-            'handlers': ['file', 'console'],
-            'level': logging.WARNING,
-            'propagate': True,
-        },
-        'aiogram.event': {
-            'level': logging.WARNING,
+        'aiogram': {
+            'level': 'WARNING',
         },
     }
 }
 
 logging.config.dictConfig(LOG_CONFIG)
+
+# Переопределяем logger сразу
 logger = logging.getLogger("box_bot")
+logger.setLevel(logging.DEBUG)
+logger.debug("=== Logging initialized with DEBUG level ===")
 app = FastAPI()
 
 
@@ -4330,39 +4332,46 @@ async def telegram_webhook(request: Request):
 
 @app.on_event("startup")
 async def on_startup():
+    logger.debug("on_startup started")
     logger.info("=== FastAPI Startup: начало инициализации ===")
-    logger.info("BOT VERSION MARK: 2026-01-29 FINAL (webhook)")
+    logger.debug("BOT VERSION MARK: 2026-01-29 FINAL (webhook)")
 
     retries = 3
     engine = None
     while retries > 0:
         try:
+            logger.debug(f"Attempt {4-retries}/3 to create engine")
             engine = make_engine(Config.DB_PATH)
-            logger.info(f"Engine создан для {Config.DB_PATH}")
+            logger.debug("Engine created")
 
+            logger.debug("Calling init_db")
             init_db(engine)
             logger.info("init_db выполнен (drop_all + create_all)")
 
             inspector = inspect(engine)
             tables = inspector.get_table_names()
-            logger.info(f"Таблицы после init_db: {tables}")
+            logger.debug(f"Tables after init_db: {tables}")
 
+            logger.debug("Starting seed_data session")
             with Session(engine) as sess:
                 try:
                     with open("INFO_FOR_DB/PROMOCODES/promocodes.txt", "r", encoding="utf-8") as f:
                         codes = [line.strip() for line in f if line.strip().isdigit() and len(line.strip()) == 3]
-                    logger.info(f"Загружено {len(codes)} кодов из promocodes.txt")
+                    logger.debug(f"Loaded {len(codes)} codes")
                 except FileNotFoundError as e:
-                    logger.error(f"Файл promocodes.txt НЕ НАЙДЕН: {e}")
+                    logger.error(f"promocodes.txt not found: {e}")
                     codes = []
 
+                logger.debug("Calling seed_data")
                 seed_data(sess, anxiety_codes=codes)
+                logger.debug("seed_data done, committing")
                 sess.commit()
                 logger.info("seed_data + commit выполнен")
 
             # Финальный чек
             inspector = inspect(engine)
             if not inspector.has_table("orders"):
+                logger.error("Таблица orders НЕ создана!")
                 raise RuntimeError("Таблица orders не создана после init_db!")
             logger.info("DB проверена: все таблицы на месте.")
             break
@@ -4376,13 +4385,13 @@ async def on_startup():
         logger.critical("Не удалось инициализировать БД после 3 попыток!")
         await notify_admin("❌ Критическая ошибка: DB не инициализирована!")
 
-    # Фоновые задачи
+    logger.debug("Starting background tasks")
     await asyncio.sleep(2)
     asyncio.create_task(check_all_shipped_orders())
     asyncio.create_task(check_pending_timeouts())
     await check_channel_permissions()
 
-    # Установка webhook
+    logger.debug("Setting webhook")
     webhook_url = f"https://bot.rehy.ru{WEBHOOK_PATH}"
     await bot.set_webhook(
         url=webhook_url,
@@ -4392,7 +4401,7 @@ async def on_startup():
     )
     webhook_info = await bot.get_webhook_info()
     logger.info(f"Webhook установлен: {webhook_url}")
-    logger.info(f"Webhook info: {webhook_info.dict() if webhook_info else 'None'}")
+    logger.debug(f"Webhook info: {webhook_info.dict() if webhook_info else 'None'}")
 
     logger.info("=== FastAPI Startup завершён успешно ===")
 
