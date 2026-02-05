@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import logging
+import logging.config
 import requests
 from pathlib import Path
 from collections import defaultdict
@@ -36,6 +37,58 @@ from aiogram.types import Update
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import inspect
 
+
+LOG_CONFIG = {
+    'version': 1,
+    'disable_existing_loggers': False,  # Ключевой: не отключать наши loggers
+    'formatters': {
+        'standard': {
+            'format': '%(asctime)s | %(levelname)s | %(name)s | %(message)s'
+        },
+    },
+    'handlers': {
+        'file': {
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': 'bot.log',
+            'maxBytes': 10 * 1024 * 1024,
+            'backupCount': 5,
+            'formatter': 'standard',
+            'level': logging.WARNING,
+        },
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+            'level': logging.WARNING,
+        },
+    },
+    'loggers': {
+        '': {  # root logger
+            'handlers': ['file', 'console'],
+            'level': logging.WARNING,
+            'propagate': True,
+        },
+        'uvicorn': {
+            'handlers': ['file', 'console'],
+            'level': logging.WARNING,
+            'propagate': True,
+        },
+        'uvicorn.error': {
+            'level': logging.WARNING,
+            'propagate': True,
+        },
+        'uvicorn.access': {
+            'handlers': ['file', 'console'],
+            'level': logging.WARNING,
+            'propagate': True,
+        },
+        'aiogram.event': {
+            'level': logging.WARNING,
+        },
+    }
+}
+
+logging.config.dictConfig(LOG_CONFIG)
+logger = logging.getLogger("box_bot")
 app = FastAPI()
 
 
@@ -94,8 +147,6 @@ STREET_KEYWORDS = [
 # --- CDEK TEST CREDENTIALS ---
 CDEK_ACCOUNT = os.getenv("CDEK_ACCOUNT")
 CDEK_SECURE_PASSWORD = os.getenv("CDEK_SECURE_PASSWORD")
-
-logger = logging.getLogger("box_bot")
 
 logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 logging.getLogger("uvicorn").setLevel(logging.WARNING)  # Меньше uvicorn spam
@@ -4301,8 +4352,8 @@ async def on_startup():
                     with open("INFO_FOR_DB/PROMOCODES/promocodes.txt", "r", encoding="utf-8") as f:
                         codes = [line.strip() for line in f if line.strip().isdigit() and len(line.strip()) == 3]
                     logger.info(f"Загружено {len(codes)} кодов из promocodes.txt")
-                except FileNotFoundError:
-                    logger.error("Файл promocodes.txt НЕ НАЙДЕН!")
+                except FileNotFoundError as e:
+                    logger.error(f"Файл promocodes.txt НЕ НАЙДЕН: {e}")
                     codes = []
 
                 seed_data(sess, anxiety_codes=codes)
@@ -4311,22 +4362,19 @@ async def on_startup():
 
             # Финальный чек
             inspector = inspect(engine)
-            if not inspector.has_table("users") or not inspector.has_table("orders"):
-                logger.error("Критическая ошибка: таблицы НЕ созданы после init_db!")
-                raise RuntimeError("DB initialization failed - tables missing")
-
+            if not inspector.has_table("orders"):
+                raise RuntimeError("Таблица orders не создана после init_db!")
             logger.info("DB проверена: все таблицы на месте.")
             break
 
         except Exception as e:
             retries -= 1
-            logger.error(f"Ошибка инициализации DB (осталось попыток: {retries}): {e}")
+            logger.exception(f"Ошибка инициализации DB (осталось попыток: {retries}): {e}")
             await asyncio.sleep(5)
 
     if retries == 0 or engine is None:
-        logger.critical("Не удалось инициализировать БД после 3 попыток — сервер НЕ запустится полностью!")
-        # Можно raise, чтобы uvicorn упал, но лучше продолжить с ошибкой
-        return
+        logger.critical("Не удалось инициализировать БД после 3 попыток!")
+        await notify_admin("❌ Критическая ошибка: DB не инициализирована!")
 
     # Фоновые задачи
     await asyncio.sleep(2)
