@@ -3974,18 +3974,26 @@ async def check_all_shipped_orders():
 async def check_pending_timeouts():
     while True:
         try:
+            logger.info("Starting pending timeouts check")
             engine = make_engine(Config.DB_PATH)
             with Session(engine) as sess:
                 pending_orders = sess.query(Order).filter(
                     Order.status == OrderStatus.PENDING_PAYMENT.value,
                     Order.created_at < datetime.now(timezone.utc) - timedelta(seconds=Config.PAYMENT_TIMEOUT_SEC)
                 ).all()
+                logger.info(f"Found {len(pending_orders)} pending orders: {[o.id for o in pending_orders]}")
 
                 for order in pending_orders:
+                    logger.info(f"Processing order #{order.id} (current status: {order.status})")
                     succeeded = False
-                    for k, pid in order.extra_data.get("pending_payments", {}).items():
+                    pending_payments = order.extra_data.get("pending_payments", {})
+                    logger.info(f"Pending payments for #{order.id}: {pending_payments}")
+
+                    for k, pid in pending_payments.items():
+                        logger.info(f"Checking payment {pid} for kind '{k}'")
                         try:
                             payment = Payment.find_one(pid)
+                            logger.info(f"Payment {pid} status: {payment.status}")
                             if payment.status == "succeeded":
                                 succeeded = True
                                 if k == "full":
@@ -3997,29 +4005,47 @@ async def check_pending_timeouts():
                                 elif k == "rem":
                                     order.payment_kind = "remainder"
                                     order.status = OrderStatus.PAID_FULL.value
-                                # Commit изменений статуса ПЕРЕД notify (чтобы статус сохранился даже если notify упадёт)
-                                sess.commit()
+                                else:
+                                    logger.warning(f"Unknown payment kind '{k}' for succeeded payment - skipping update")
+                                    continue
+                                logger.info(f"Updated order #{order.id} status to {order.status} (kind: {k})")
+                                try:
+                                    sess.commit()
+                                    logger.info(f"Commit successful for order #{order.id}")
+                                except Exception as commit_e:
+                                    logger.error(f"Commit failed for order #{order.id}: {commit_e}")
+                                    sess.rollback()
+                                    await notify_admin(f"⚠️ Commit failed in timeouts for #{order.id}: {commit_e}")
                                 try:
                                     await notify_admins_payment_success(order.id)
-                                except Exception as e:
-                                    logger.error(f"Notify failed for succeeded order {order.id} (status already updated): {e}")
-                                    await notify_admin(f"⚠️ Ошибка уведомления для заказа #{order.id} (оплата прошла, статус обновлён): {e}")
+                                    logger.info(f"Notify sent for order #{order.id}")
+                                except Exception as notify_e:
+                                    logger.error(f"Notify failed for order #{order.id}: {notify_e}")
+                                    await notify_admin(f"⚠️ Notify failed in timeouts for #{order.id}: {notify_e}")
                                 break
-                        except Exception as e:
-                            logger.error(f"Ошибка проверки платежа {pid} для заказа {order.id}: {e}")
-                            # Продолжаем, не ставим succeeded=True
+                        except Exception as payment_e:
+                            logger.error(f"Error checking payment {pid} for order #{order.id}: {payment_e}")
 
                     if not succeeded:
+                        logger.info(f"No succeeded payments for #{order.id} - abandoning")
                         order.status = OrderStatus.ABANDONED.value
-                        sess.commit()  # Commit перед send_message
+                        try:
+                            sess.commit()
+                            logger.info(f"Commit successful for abandoned #{order.id}")
+                        except Exception as commit_e:
+                            logger.error(f"Commit failed for abandoned #{order.id}: {commit_e}")
+                            sess.rollback()
                         try:
                             await bot.send_message(order.user_id, f"Ваш заказ #{order.id} был отменён из-за отсутствия оплаты в течение 10 минут.")
-                        except Exception as e:
-                            logger.error(f"Сообщение клиенту о таймауте заказа {order.id} не отправлено: {e}")
+                            logger.info(f"Abandon message sent to user for #{order.id}")
+                        except Exception as msg_e:
+                            logger.error(f"Abandon message failed for #{order.id}: {msg_e}")
 
+            logger.info("Pending timeouts check completed")
             await asyncio.sleep(60)  # Проверять каждую минуту
         except Exception as e:
-            logger.exception(f"Ошибка в check_pending_timeouts: {e}")
+            logger.exception(f"Global error in check_pending_timeouts: {e}")
+            await notify_admin(f"❌ Global error in timeouts task: {e}")
 
 
 async def check_channel_permissions():
