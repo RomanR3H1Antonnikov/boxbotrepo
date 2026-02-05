@@ -3982,14 +3982,12 @@ async def check_pending_timeouts():
                 ).all()
 
                 for order in pending_orders:
-                    # Проверяем, не оплачен ли уже (на случай race)
                     succeeded = False
                     for k, pid in order.extra_data.get("pending_payments", {}).items():
                         try:
                             payment = Payment.find_one(pid)
                             if payment.status == "succeeded":
                                 succeeded = True
-                                # Авто-обновляем как в handle
                                 if k == "full":
                                     order.payment_kind = "full"
                                     order.status = OrderStatus.PAID_FULL.value
@@ -3999,15 +3997,25 @@ async def check_pending_timeouts():
                                 elif k == "rem":
                                     order.payment_kind = "remainder"
                                     order.status = OrderStatus.PAID_FULL.value
-                                await notify_admins_payment_success(order.id)  # generic
+                                # Commit изменений статуса ПЕРЕД notify (чтобы статус сохранился даже если notify упадёт)
+                                sess.commit()
+                                try:
+                                    await notify_admins_payment_success(order.id)
+                                except Exception as e:
+                                    logger.error(f"Notify failed for succeeded order {order.id} (status already updated): {e}")
+                                    await notify_admin(f"⚠️ Ошибка уведомления для заказа #{order.id} (оплата прошла, статус обновлён): {e}")
                                 break
-                        except:
-                            pass
+                        except Exception as e:
+                            logger.error(f"Ошибка проверки платежа {pid} для заказа {order.id}: {e}")
+                            # Продолжаем, не ставим succeeded=True
 
                     if not succeeded:
                         order.status = OrderStatus.ABANDONED.value
-                        sess.commit()
-                        await bot.send_message(order.user_id, f"Ваш заказ #{order.id} был отменён из-за отсутствия оплаты в течение 10 минут.")
+                        sess.commit()  # Commit перед send_message
+                        try:
+                            await bot.send_message(order.user_id, f"Ваш заказ #{order.id} был отменён из-за отсутствия оплаты в течение 10 минут.")
+                        except Exception as e:
+                            logger.error(f"Сообщение клиенту о таймауте заказа {order.id} не отправлено: {e}")
 
             await asyncio.sleep(60)  # Проверять каждую минуту
         except Exception as e:
