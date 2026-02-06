@@ -267,48 +267,81 @@ async def get_available_tariffs(
         return []
 
 
+def choose_tariff(available: List[dict]) -> Optional[int]:
+    """
+    Выбирает подходящий тариф из списка: mode=4 (склад-склад), минимальный по цене.
+    Предпочтение 358, если доступен.
+    """
+    candidates = [t for t in available if t.get('delivery_mode') == 4]  # склад-склад (для ПВЗ)
+    if not candidates:
+        logger.warning("Нет тарифов с delivery_mode=4")
+        return None
+
+    # Сортируем: сначала 358, если есть, иначе min по sum
+    candidates.sort(key=lambda t: (t['tariff_code'] != 358, t['delivery_sum']))  # 358 first, then cheapest
+    selected = candidates[0]['tariff_code']
+    logger.info(f"Выбран тариф {selected} из {len(candidates)} кандидатов")
+    return selected
+
+
 async def calculate_cdek_delivery_cost(
-    pvz_code: str,
-    city_code: str,               # ← добавляем обязательный параметр
+        pvz_code: str,
+        city_code: str,
 ) -> Optional[dict]:
     token = await get_cdek_prod_token()
     if not token:
         return None
 
-    url = "https://api.cdek.ru/v2/calculator/tariff"
+    # Получаем список доступных тарифов (как в get_available_tariffs, но с твоими params)
+    url = "https://api.cdek.ru/v2/calculator/tarifflist"
     payload = {
-        "type": 1,                    # ← меняем на 1 (физлицо) — это часто снимает ошибку совместимости
-        "tariff_code": 233,           # ← один из самых универсальных тарифов до ПВЗ в 2025–2026
+        "type": 1,  # Физлицо для расчёта (поддержка рекомендует 2 для ИМ, но для calc ок 1)
         "from_location": {"code": int(Config.CDEK_FROM_CITY_CODE)},
         "to_location": {"code": int(city_code)},
-        "delivery_point": pvz_code,   # ← код ПВЗ обязателен для тарифов до пункта выдачи
+        "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE,
+        "delivery_point": pvz_code,
         "packages": [{
             "weight": Config.PACKAGE_WEIGHT_G,
             "length": Config.PACKAGE_LENGTH_CM,
             "width": Config.PACKAGE_WIDTH_CM,
             "height": Config.PACKAGE_HEIGHT_CM,
-        }],
-        # "services": [{"code": "INSURANCE", "parameter": Config.PRICE_RUB}]  # пока закомментировать
+        }]
     }
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     try:
         r = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=15)
-        r.raise_for_status()  # сразу кинет исключение при 4xx/5xx
-
+        r.raise_for_status()
         data = r.json()
-        cost = int(data.get("delivery_sum", 0))
-        period_min = data.get("calendar_min", data.get("period_min", 0))
-        period_max = data.get("calendar_max", data.get("period_max", period_min + 2))
+        available = data.get("tariff_codes", [])
 
-        logger.info(f"СДЭК до ПВЗ {pvz_code} (город {city_code}): {cost} ₽, {period_min}–{period_max} дн")
-        return {"cost": cost, "period_min": period_min, "period_max": period_max}
+        if not available:
+            logger.warning(f"Нет доступных тарифов для ПВЗ {pvz_code} (город {city_code})")
+            return None
+
+        tariff = choose_tariff(available)
+        if not tariff:
+            logger.warning("Не найден подходящий тариф")
+            return None
+
+        # Находим выбранный в списке для cost/period
+        selected = next((t for t in available if t['tariff_code'] == tariff), None)
+        if not selected:
+            return None
+
+        cost = int(selected.get("delivery_sum", 590))  # fallback if missing
+        period_min = selected.get("period_min", 3)
+        period_max = selected.get("period_max", 7)
+
+        logger.info(
+            f"Расчёт для {pvz_code} (город {city_code}): tariff={tariff}, {cost} ₽, {period_min}–{period_max} дн")
+        return {"cost": cost, "period_min": period_min, "period_max": period_max, "tariff": tariff}
 
     except requests.HTTPError as e:
-        logger.warning(f"СДЭК тариф ошибка {r.status_code}: {r.text[:600]}")
+        logger.warning(f"СДЭК tarifflist ошибка {r.status_code}: {r.text[:600]}")
         return None
     except Exception as e:
-        logger.error(f"Исключение при расчёте тарифа: {e}")
+        logger.error(f"Исключение при расчёте: {e}")
         return None
 
 
@@ -619,7 +652,7 @@ async def create_yookassa_payment(order: Order, amount_rub: int, description: st
             return None
 
 
-async def create_cdek_order(order_id: int) -> bool:
+async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # Добавили param с default 358
     token = await get_cdek_prod_token()
     if not token:
         logger.error("Нет токена СДЭК")
@@ -627,14 +660,12 @@ async def create_cdek_order(order_id: int) -> bool:
 
     engine = make_engine(Config.DB_PATH)
 
-    # ================== 1. Загружаем заказ и пользователя ==================
     with Session(engine) as sess:
         order = sess.get(Order, order_id)
         if not order:
             logger.error(f"Заказ #{order_id} не найден")
             return False
 
-        # FIX: Refresh to ensure attached
         sess.refresh(order)
 
         pvz_code = order.extra_data.get("pvz_code")
@@ -649,41 +680,39 @@ async def create_cdek_order(order_id: int) -> bool:
 
         address = order.address or "ПВЗ СДЭК"
         postal_code = order.extra_data.get("postal_code", "000000")
-        city_code = order.extra_data.get("city_code", "44")  # Москва по умолчанию; бери из твоей логики
+        city_code = order.extra_data.get("city_code", "44")
 
-    # ================== 2. Формируем payload (ИСПРАВЛЕННЫЙ) ==================
     payload = {
-        "type": 2,  # Доставка
+        "type": 2,  # Оставляем 2 (для ИМ, по рекомендации поддержки)
         "number": f"BOX{order_id}",
-        "tariff_code": 2536,
+        "tariff_code": tariff_code,  # Теперь динамический
         "comment": f"Заказ из бота «ТВОЯ КОРОБОЧКА» #{order_id}",
-        "delivery_point": str(pvz_code),  # Код ПВЗ ПОЛУЧАТЕЛЯ (required для "до склада")
+        "delivery_point": str(pvz_code),
         "delivery_recipient_cost": {"value": 0},
-        "to_location": {  # Опционально, если нужно уточнить; иначе можно убрать
+        "to_location": {
             "address": address,
             "postal_code": postal_code,
-            "code": int(city_code) if city_code else None  # Код ГОРОДА (int)
+            "code": int(city_code) if city_code else None
         },
         "sender": {
-            "contact": {  # Required обёртка
+            "contact": {
                 "company": "ИП Большаков А. М.",
                 "name": "Алексей",
                 "phones": [{"number": "+79651051779"}]
             },
-            "location": {  # Required для sender (минимум address или code)
-                "code": 44,  # Москва; подставь реальный город отправителя
-                "address": "Москва, пр-д 2-й Грайвороновский проезд, 42к4"  # Добавь реальный адрес отправителя
+            "location": {
+                "code": 44,
+                "address": "Москва, пр-д 2-й Грайвороновский проезд, 42к4"
             },
-            "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE  # Код ПВЗ ОТПРАВИТЕЛЯ (здесь правильно)
+            "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE
         },
         "recipient": {
-            "contact": {  # Required обёртка
+            "contact": {
                 "name": user.full_name,
                 "phones": [{
                     "number": user.phone.replace("+", "").replace(" ", "").replace("-", "")
                 }]
             }
-            # location не обязателен, если delivery_point задан
         },
         "packages": [{
             "number": f"BOX{order_id}",
@@ -701,8 +730,9 @@ async def create_cdek_order(order_id: int) -> bool:
                 "amount": 1,
             }],
         }],
-        "services": [{"code": "INSURANCE", "parameter": Config.PRICE_RUB}]
+        # "services": [{"code": "INSURANCE", "parameter": Config.PRICE_RUB}]  # Закомментировали
     }
+
 
     import json
     logger.info(
@@ -2326,29 +2356,29 @@ async def cb_admin_set_shipped(cb: CallbackQuery):
 
             # Достаём данные из заказа
             pvz_code = order.extra_data.get("pvz_code")
-            city_code = order.extra_data.get("city_code", "44")  # fallback Москва
+            city_code = order.extra_data.get("city_code", "44")
 
             if not pvz_code:
                 await notify_admin(f"Ошибка: нет pvz_code в заказе #{oid}")
                 await cb.answer("Нет кода ПВЗ получателя", show_alert=True)
                 return
 
-            # Проверяем доступность тарифа 2536
             available = await get_available_tariffs(
                 from_pvz=Config.CDEK_SHIPMENT_POINT_CODE,
                 to_pvz=str(pvz_code),
                 to_city_code=str(city_code)
             )
 
-            if 2536 not in available:
-                msg = f"Тариф 2536 недоступен для ПВЗ {pvz_code} (город {city_code}). Доступны: {available}"
+            tariff = choose_tariff(available)  # Новая функция
+            if not tariff:
+                msg = f"Нет подходящих тарифов для ПВЗ {pvz_code} (город {city_code}). Доступны: {available}"
                 logger.warning(msg)
                 await notify_admin(msg)
-                await cb.answer("Тариф 2536 недоступен между этими пунктами", show_alert=True)
+                await cb.answer("Нет доступных тарифов для отправки", show_alert=True)
                 return
 
-            # Если тариф доступен — создаём заказ
-            success = await create_cdek_order(oid)
+            # Если тариф найден — создаём
+            success = await create_cdek_order(oid, tariff_code=tariff)  # Передаём выбранный tariff
             if not success:
                 await cb.answer("Ошибка создания заказа в CDEK", show_alert=True)
                 return
