@@ -233,6 +233,40 @@ async def get_cdek_prod_token() -> Optional[str]:
         return None
 
 
+async def get_available_tariffs(
+    from_pvz: str,           # код пункта отгрузки (MSK2296)
+    to_pvz: str,             # код ПВЗ получателя
+    to_city_code: str,       # ← добавили явно код города получателя
+    weight_g: int = 750
+) -> list:
+    token = await get_cdek_prod_token()
+    if not token:
+        return []
+
+    url = "https://api.cdek.ru/v2/calculator/tarifflist"
+    payload = {
+        "type": 2,
+        "from_location": {"code": 44},           # Москва
+        "to_location": {"code": int(to_city_code)},  # ← используем переданный код города
+        "packages": [{"weight": weight_g}],
+        "shipment_point": from_pvz,
+        "delivery_point": to_pvz
+    }
+
+    try:
+        r = requests.post(url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        if r.status_code == 200:
+            tariffs = r.json().get("tariff_codes", [])
+            logger.info(f"Доступные тарифы для {to_pvz} (город {to_city_code}): {tariffs}")
+            return tariffs
+        else:
+            logger.warning(f"tarifflist ошибка {r.status_code}: {r.text[:400]}")
+            return []
+    except Exception as e:
+        logger.error(f"Ошибка запроса tarifflist: {e}")
+        return []
+
+
 async def calculate_cdek_delivery_cost(pvz_code: str) -> Optional[dict]:
     """Возвращает dict: {'cost': int, 'period_min': int, 'period_max': int}"""
     token = await get_cdek_prod_token()
@@ -241,8 +275,8 @@ async def calculate_cdek_delivery_cost(pvz_code: str) -> Optional[dict]:
 
     url = "https://api.cdek.ru/v2/calculator/tariff"
     payload = {
-        "type": 1,
-        "tariff_code": 136,
+        "type": 2,
+        "tariff_code": 2536,
         "from_location": {"code": Config.CDEK_FROM_CITY_CODE},
         "to_location": {"code": pvz_code},
         "packages": [{
@@ -611,36 +645,42 @@ async def create_cdek_order(order_id: int) -> bool:
 
         address = order.address or "ПВЗ СДЭК"
         postal_code = order.extra_data.get("postal_code", "000000")
+        city_code = order.extra_data.get("city_code", "44")  # Москва по умолчанию; бери из твоей логики
 
-    # ================== 2. Формируем payload ==================
+    # ================== 2. Формируем payload (ИСПРАВЛЕННЫЙ) ==================
     payload = {
-        "type": 2,
+        "type": 2,  # Доставка
         "number": f"BOX{order_id}",
-        "tariff_code": 136,
+        "tariff_code": 2536,
         "comment": f"Заказ из бота «ТВОЯ КОРОБОЧКА» #{order_id}",
-        "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE,
-
+        "delivery_point": str(pvz_code),  # Код ПВЗ ПОЛУЧАТЕЛЯ (required для "до склада")
         "delivery_recipient_cost": {"value": 0},
-
-        "to_location": {
-            "code": str(pvz_code),
+        "to_location": {  # Опционально, если нужно уточнить; иначе можно убрать
             "address": address,
             "postal_code": postal_code,
+            "code": int(city_code) if city_code else None  # Код ГОРОДА (int)
         },
-
         "sender": {
-            "company": "ИП Большаков А. М.",
-            "name": "Алексей",
-            "phones": [{"number": "+79651051779"}],
+            "contact": {  # Required обёртка
+                "company": "ИП Большаков А. М.",
+                "name": "Алексей",
+                "phones": [{"number": "+79651051779"}]
+            },
+            "location": {  # Required для sender (минимум address или code)
+                "code": 44,  # Москва; подставь реальный город отправителя
+                "address": "Москва, пр-д 2-й Грайвороновский проезд, 42к4"  # Добавь реальный адрес отправителя
+            },
+            "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE  # Код ПВЗ ОТПРАВИТЕЛЯ (здесь правильно)
         },
-
         "recipient": {
-            "name": user.full_name,
-            "phones": [{
-                "number": user.phone.replace("+", "").replace(" ", "").replace("-", "")  # type: ignore[attr-defined]
-            }],
+            "contact": {  # Required обёртка
+                "name": user.full_name,
+                "phones": [{
+                    "number": user.phone.replace("+", "").replace(" ", "").replace("-", "")
+                }]
+            }
+            # location не обязателен, если delivery_point задан
         },
-
         "packages": [{
             "number": f"BOX{order_id}",
             "weight": Config.PACKAGE_WEIGHT_G,
@@ -657,10 +697,7 @@ async def create_cdek_order(order_id: int) -> bool:
                 "amount": 1,
             }],
         }],
-
-        "services": [
-            {"code": "INSURANCE", "parameter": Config.PRICE_RUB}
-        ],
+        "services": [{"code": "INSURANCE", "parameter": Config.PRICE_RUB}]
     }
 
     import json
@@ -2267,14 +2304,15 @@ async def cb_admin_set_assembled(cb: CallbackQuery):
 @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_SHIPPED.value))
 async def cb_admin_set_shipped(cb: CallbackQuery):
     logger.info(f"Set shipped callback: user_id={cb.from_user.id}, data={cb.data}")
-    oid = None
+
     try:
         oid = int(cb.data.split(":")[2])
 
         engine = make_engine(Config.DB_PATH)
         with Session(engine) as sess:
             order = sess.get(Order, oid)
-            if not order or order.status != OrderStatus.ASSEMBLED.value or order.payment_kind not in ["full", "remainder"]:
+            if not order or order.status != OrderStatus.ASSEMBLED.value or order.payment_kind not in ["full",
+                                                                                                      "remainder"]:
                 await cb.answer("Нельзя отправить этот заказ", show_alert=True)
                 return
 
@@ -2282,23 +2320,46 @@ async def cb_admin_set_shipped(cb: CallbackQuery):
                 await cb.answer("Доступ запрещён", show_alert=True)
                 return
 
-            # Создаём CDEK
+            # Достаём данные из заказа
+            pvz_code = order.extra_data.get("pvz_code")
+            city_code = order.extra_data.get("city_code", "44")  # fallback Москва
+
+            if not pvz_code:
+                await notify_admin(f"Ошибка: нет pvz_code в заказе #{oid}")
+                await cb.answer("Нет кода ПВЗ получателя", show_alert=True)
+                return
+
+            # Проверяем доступность тарифа 2536
+            available = await get_available_tariffs(
+                from_pvz=Config.CDEK_SHIPMENT_POINT_CODE,
+                to_pvz=str(pvz_code),
+                to_city_code=str(city_code)
+            )
+
+            if 2536 not in available:
+                msg = f"Тариф 2536 недоступен для ПВЗ {pvz_code} (город {city_code}). Доступны: {available}"
+                logger.warning(msg)
+                await notify_admin(msg)
+                await cb.answer("Тариф 2536 недоступен между этими пунктами", show_alert=True)
+                return
+
+            # Если тариф доступен — создаём заказ
             success = await create_cdek_order(oid)
             if not success:
                 await cb.answer("Ошибка создания заказа в CDEK", show_alert=True)
                 return
 
-            # Reload fresh after create (which sets SHIPPED)
+            # Перезагружаем order после создания (он уже SHIPPED)
             order = sess.get(Order, oid)
 
         await notify_client_order_shipped(order.id, cb.message)
         await edit_or_send(cb.message, f"Заказ #{oid} отправлен.", kb_admin_panel())
-        await cb.answer()
+        await cb.answer("Отправлено!")
 
     except Exception as e:
-        logger.error(f"Admin set shipped error: {e}")
-        await notify_admin(f"❌ Ошибка отправки заказа #{oid if 'oid' in locals() else 'неизвестный'}")
-        await cb.answer("Ошибка", show_alert=True)
+        logger.exception(f"Admin set shipped error для заказа #{oid if 'oid' in locals() else 'неизвестный'}")
+        await notify_admin(f"❌ Ошибка отправки заказа #{oid if 'oid' in locals() else 'неизвестный'}\n{e}")
+        await cb.answer("Ошибка при отправке", show_alert=True)
 
 
 @r.callback_query(F.data.startswith(CallbackData.ADMIN_SET_ARCHIVED.value))
@@ -2532,6 +2593,7 @@ async def cb_pvz_select(cb: CallbackQuery):
     )
 
     await cb.answer("Готово!")
+    logger.info(f"Создали заказ #{order.id}, extra_data = {order.extra_data}")
 
     # Gift question
     await cb.message.answer(
