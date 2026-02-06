@@ -267,45 +267,49 @@ async def get_available_tariffs(
         return []
 
 
-async def calculate_cdek_delivery_cost(pvz_code: str) -> Optional[dict]:
-    """Возвращает dict: {'cost': int, 'period_min': int, 'period_max': int}"""
+async def calculate_cdek_delivery_cost(
+    pvz_code: str,
+    city_code: str,               # ← добавляем обязательный параметр
+) -> Optional[dict]:
     token = await get_cdek_prod_token()
     if not token:
         return None
 
     url = "https://api.cdek.ru/v2/calculator/tariff"
     payload = {
-        "type": 2,
-        "tariff_code": 2536,
-        "from_location": {"code": Config.CDEK_FROM_CITY_CODE},
-        "to_location": {"code": pvz_code},
+        "type": 1,                    # ← меняем на 1 (физлицо) — это часто снимает ошибку совместимости
+        "tariff_code": 233,           # ← один из самых универсальных тарифов до ПВЗ в 2025–2026
+        "from_location": {"code": int(Config.CDEK_FROM_CITY_CODE)},
+        "to_location": {"code": int(city_code)},
+        "delivery_point": pvz_code,   # ← код ПВЗ обязателен для тарифов до пункта выдачи
         "packages": [{
             "weight": Config.PACKAGE_WEIGHT_G,
             "length": Config.PACKAGE_LENGTH_CM,
             "width": Config.PACKAGE_WIDTH_CM,
             "height": Config.PACKAGE_HEIGHT_CM,
-        }]
+        }],
+        # "services": [{"code": "INSURANCE", "parameter": Config.PRICE_RUB}]  # пока закомментировать
     }
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     try:
         r = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            cost = int(data.get("delivery_sum", 0))
-            period_min = data.get("calendar_min", 0) or data.get("period_min", 0)
-            period_max = data.get("calendar_max", 0) or data.get("period_max", 0)
-            logger.info(f"СДЭК: до {pvz_code} → {cost}₽, срок {period_min}–{period_max} дн.")
-            return {
-                "cost": cost,
-                "period_min": period_min,
-                "period_max": period_max
-            }
-        else:
-            logger.warning(f"Ошибка тарифа: {r.status_code} {r.text}")
+        r.raise_for_status()  # сразу кинет исключение при 4xx/5xx
+
+        data = r.json()
+        cost = int(data.get("delivery_sum", 0))
+        period_min = data.get("calendar_min", data.get("period_min", 0))
+        period_max = data.get("calendar_max", data.get("period_max", period_min + 2))
+
+        logger.info(f"СДЭК до ПВЗ {pvz_code} (город {city_code}): {cost} ₽, {period_min}–{period_max} дн")
+        return {"cost": cost, "period_min": period_min, "period_max": period_max}
+
+    except requests.HTTPError as e:
+        logger.warning(f"СДЭК тариф ошибка {r.status_code}: {r.text[:600]}")
+        return None
     except Exception as e:
         logger.error(f"Исключение при расчёте тарифа: {e}")
-    return None
+        return None
 
 
 async def get_cdek_order_status(cdek_uuid: str) -> Optional[str]:
@@ -2540,7 +2544,10 @@ async def cb_pvz_select(cb: CallbackQuery):
 
         await cb.message.answer("Считаю стоимость доставки…")
 
-        delivery_info = await calculate_cdek_delivery_cost(city_code)
+        delivery_info = await calculate_cdek_delivery_cost(
+            pvz_code=str(real_code),  # ← код ПВЗ
+            city_code=city_code  # ← код города, который уже есть
+        )
 
         delivery_cost = delivery_info["cost"] if delivery_info else 590
         period_text = "3–7"
@@ -2570,6 +2577,7 @@ async def cb_pvz_select(cb: CallbackQuery):
         )
 
         order_id = order.id
+        logger.info(f"Создали заказ #{order.id}, extra_data = {order.extra_data}")
 
         user.pvz_for_order_id = order_id
         user.awaiting_gift_message = False
@@ -2593,7 +2601,6 @@ async def cb_pvz_select(cb: CallbackQuery):
     )
 
     await cb.answer("Готово!")
-    logger.info(f"Создали заказ #{order.id}, extra_data = {order.extra_data}")
 
     # Gift question
     await cb.message.answer(
@@ -2936,7 +2943,10 @@ async def cb_pvz_confirm(cb: CallbackQuery):
         city_code = pvz.get("city_code", Config.CDEK_FROM_CITY_CODE)
 
         await cb.message.answer("Считаю стоимость доставки…")
-        delivery_info = await calculate_cdek_delivery_cost(city_code)
+        delivery_info = await calculate_cdek_delivery_cost(
+            pvz_code=str(real_code),
+            city_code=city_code
+        )
 
         delivery_cost = delivery_info["cost"] if delivery_info else 590
         period_text = "3–7"
