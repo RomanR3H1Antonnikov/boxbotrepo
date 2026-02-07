@@ -701,15 +701,13 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
         "comment": f"Заказ из бота «ТВОЯ КОРОБОЧКА» #{order_id}",
         "delivery_point": str(pvz_code),
         "delivery_recipient_cost": {"value": 0},
-        "from_location": {"code": 44},  # from city
-        "to_location": {"code": int(city_code)},
         "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE,
 
         "sender": {
             "company": "ИП Большаков А. М.",
             "name": "Алексей",
             "phones": [{"number": "+79651051779"}],
-            "location": {"code": 44},
+            # УДАЛИТЬ: "location": {"code": 44},  # ← это вызывало v2_shipment_address_multivalued
         },
         "recipient": {
             "name": user.full_name,
@@ -732,11 +730,8 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
                 "amount": 1,
             }],
         }],
-        # "services": [{"code": "INSURANCE", "parameter": Config.PRICE_RUB}]  # Закомментировали
     }
 
-    # УБРАЛИ: import json (предполагаем, что уже есть в начале файла)
-    # Заменили print на logger
     logger.info(
         f"\n=== ОТПРАВЛЯЕМ В СДЭК ЗАКАЗ #{order_id} ===\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
