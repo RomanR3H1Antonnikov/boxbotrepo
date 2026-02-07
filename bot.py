@@ -687,6 +687,17 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:
             logger.error(f"Нет pvz_code для заказа #{order.id}")
             return False
 
+        # Проверяем, что pvz_code — полный str с префиксом (e.g. "KZN3")
+        if not isinstance(pvz_code, str) or not re.match(r'^[A-Z]{2,5}\d+$', pvz_code, re.I):
+            logger.error(f"Некорректный pvz_code '{pvz_code}' для заказа #{order.id} — ожидается 'KZN3' и т.п.")
+            await notify_admin(f"❌ Некорректный pvz_code '{pvz_code}' в заказе #{order.id}")
+            return False
+
+        city_code = order.extra_data.get("city_code")
+        if not city_code:
+            logger.warning(f"Нет city_code для заказа #{order.id} — fallback на {Config.CDEK_FROM_CITY_CODE}")
+            city_code = Config.CDEK_FROM_CITY_CODE  # Только если None, не перезаписывать
+
         user_id = order.user_id
         full_name = order.user.full_name if order.user else None
         phone = order.user.phone if order.user else None
@@ -697,7 +708,6 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:
 
         address = order.address or "ПВЗ СДЭК"
         postal_code = order.extra_data.get("postal_code", "000000")
-        city_code = order.extra_data.get("city_code", "44")
 
     # 2. Формируем payload
     payload = {
@@ -815,11 +825,7 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:
         return False
 
 
-async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max_attempts: int = 18):
-    """
-    Проверяет статус заказа по uuid каждые ~10–15 сек до 3 минут.
-    Если появился настоящий number → сохраняем его как track и уведомляем.
-    """
+async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max_attempts: int = 60):
     if attempt >= max_attempts:
         logger.warning(f"Превышено кол-во попыток ({max_attempts}) для uuid {uuid} заказа #{order_id}")
         await notify_admin(
@@ -829,7 +835,7 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
     token = await get_cdek_prod_token()
     if not token:
         logger.error(f"Нет токена для проверки uuid {uuid}")
-        await asyncio.sleep(30)  # ждём подольше при проблеме с токеном
+        await asyncio.sleep(60)
         asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
         return
 
@@ -838,11 +844,12 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
 
     try:
         r = await asyncio.to_thread(requests.get, url, headers=headers, timeout=12)
+        logger.info(f"Polling response for uuid {uuid}: status_code={r.status_code}, json={r.text[:1000]}...")
 
         if r.status_code == 401:
-            logger.error(f"401 при проверке uuid {uuid} — токен недействителен или неверный")
+            logger.error(f"401 при проверке uuid {uuid} — токен недействителен")
             await notify_admin(f"401 Unauthorized при проверке uuid {uuid} заказа #{order_id}")
-            await asyncio.sleep(60)  # ждём минуту, возможно токен обновится
+            await asyncio.sleep(60)
             asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
             return
 
@@ -853,6 +860,24 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
             return
 
         info = r.json()
+
+        # НОВОЕ: Проверка на глобальные errors
+        errors = info.get("errors", [])
+        if errors:
+            err_msg = "; ".join([f"{e.get('code', '—')}: {e.get('message', '—')}" for e in errors])
+            logger.error(f"Глобальные ошибки в uuid {uuid}: {err_msg}")
+            await notify_admin(f"❌ Глобальные ошибки CDEK для #{order_id} (uuid {uuid}): {err_msg}")
+            return  # Stop polling
+
+        # Проверка ошибок в requests[]
+        for req in info.get("requests", []):
+            req_errors = req.get("errors", [])
+            if req_errors:
+                err_msg = "; ".join([f"{e.get('code', '—')}: {e.get('message', '—')}" for e in req_errors])
+                logger.error(f"Ошибки в request {req.get('request_uuid')}: {err_msg}")
+                await notify_admin(f"❌ Ошибки в запросе CDEK для #{order_id} (uuid {uuid}): {err_msg}")
+                return  # Stop
+
         number = info.get("number") or info.get("cdek_number")
         status_code = info.get("status", {}).get("code")
         status_desc = info.get("status", {}).get("description", "—")
@@ -860,8 +885,8 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
         logger.info(
             f"Попытка {attempt + 1}/{max_attempts} | uuid {uuid} → number={number}, status={status_code} ({status_desc})")
 
-        if number and number != f"BOX{order_id}":  # фильтруем наш временный плейсхолдер
-            engine = make_engine(Config.DB_PATH)  # локально создаём engine
+        if number and number != f"BOX{order_id}":
+            engine = make_engine(Config.DB_PATH)
             with Session(engine) as sess:
                 order = sess.get(Order, order_id)
                 if not order:
@@ -873,11 +898,10 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
                     order.extra_data = {}
                 order.extra_data["cdek_number"] = number
                 order.extra_data["cdek_final_status"] = status_code
-                order.status = OrderStatus.SHIPPED.value  # Теперь финальный SHIPPED
+                order.status = OrderStatus.SHIPPED.value
                 flag_modified(order, "extra_data")
                 sess.commit()
 
-            # Уведомления (как раньше, но добавим статус)
             await bot.send_message(
                 order.user_id,
                 f"Посылка отправлена! 🚚\n\n"
@@ -893,10 +917,9 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
                 f"Статус: {status_desc} ({status_code})"
             )
 
-            return  # Успех → выходим
+            return  # Успех
 
-        # Если number ещё нет — пробуем снова
-        delay = 10 + attempt * 2  # увеличиваем интервал: 10 → 12 → 14... сек
+        delay = min(10 + attempt * 5, 60)
         await asyncio.sleep(delay)
         asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
 
@@ -2651,23 +2674,15 @@ async def cb_pvz_select(cb: CallbackQuery):
             return
 
         raw_code = pvz.get("code")
-        if isinstance(raw_code, str):
-            # Поддерживаем любой региональный префикс: MSK, YAR, KZN, NN, SPB, EKB и т.д.
-            prefix_match = re.match(r'^([A-Z]{2,5})(\d+)', raw_code.upper())
-            if prefix_match:
-                real_code = int(prefix_match.group(2))
-            else:
-                # Если без префикса — считаем весь код числом
-                try:
-                    real_code = int(raw_code)
-                except ValueError:
-                    await cb.answer("Ошибка формата кода ПВЗ", show_alert=True)
-                    return
-        elif isinstance(raw_code, int):
-            real_code = raw_code
-        else:
+        if not isinstance(raw_code, str) or not raw_code.strip():
             await cb.answer("Некорректный код ПВЗ от СДЭК", show_alert=True)
             return
+
+        # НОВОЕ: Не обрезаем — храним полный str код (e.g. "KZN3")
+        real_code = raw_code.strip()  # str как есть
+
+        # Лог для отладки
+        logger.info(f"Выбран ПВЗ code: '{real_code}' (raw: '{raw_code}')")
 
         city_code = pvz.get("location", {}).get("code") or Config.CDEK_FROM_CITY_CODE
         city_code = str(city_code)
@@ -2685,8 +2700,8 @@ async def cb_pvz_select(cb: CallbackQuery):
         await cb.message.answer("Считаю стоимость доставки…")
 
         delivery_info = await calculate_cdek_delivery_cost(
-            pvz_code=str(real_code),  # ← код ПВЗ
-            city_code=city_code  # ← код города, который уже есть
+            pvz_code=real_code,  # ← полный str "KZN3"
+            city_code=city_code  # ← код города
         )
 
         delivery_cost = delivery_info["cost"] if delivery_info else 590
@@ -2709,7 +2724,7 @@ async def cb_pvz_select(cb: CallbackQuery):
             total_price_kop=(total * 100),
             delivery_cost_kop=(delivery_cost * 100),
             extra_data={
-                "pvz_code": real_code,
+                "pvz_code": real_code,  # ← полный str "KZN3"
                 "city_code": city_code,
                 "delivery_cost": delivery_cost,
                 "delivery_period": period_text,
@@ -4628,7 +4643,13 @@ async def on_startup():
     if retries == 0 or engine is None:
         logger.critical("Не удалось инициализировать БД после 3 попыток!")
         await notify_admin("❌ Критическая ошибка: DB не инициализирована!")
-
+    # Тест CDEK прод-токена при запуске
+    test_token = await get_cdek_prod_token()
+    if test_token:
+        logger.info("CDEK prod token OK (первые 20 символов): " + test_token[:20])
+    else:
+        logger.critical("CDEK prod token НЕ получен! Проверьте .env и подключение.")
+        await notify_admin("⚠️ CDEK prod token не получен при запуске!")
     logger.debug("Starting background tasks")
     await asyncio.sleep(2)
     asyncio.create_task(check_all_shipped_orders())
