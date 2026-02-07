@@ -5,6 +5,7 @@ import logging
 import logging.config
 import sys
 import requests
+import json
 from pathlib import Path
 from collections import defaultdict
 from typing import Optional, Dict, List
@@ -66,17 +67,17 @@ LOG_CONFIG = {
     'loggers': {
         '': {  # root
             'handlers': ['file', 'console'],
-            'level': 'DEBUG',
+            'level': 'INFO',  # ИЗМЕНИЛИ: с DEBUG на INFO (меньше спама)
             'propagate': True,
         },
         'box_bot': {
             'handlers': ['file', 'console'],
-            'level': 'DEBUG',
+            'level': 'INFO',  # ИЗМЕНИЛИ: с DEBUG на INFO
             'propagate': False,
         },
         'uvicorn': {
-            'handlers': ['console'],  # uvicorn пусть пишет только в stdout
-            'level': 'INFO',
+            'handlers': ['console'],
+            'level': 'WARNING',  # ИЗМЕНИЛИ: с INFO на WARNING (меньше спама от uvicorn)
             'propagate': False,
         },
         'aiogram': {
@@ -246,8 +247,8 @@ async def get_available_tariffs(
     url = "https://api.cdek.ru/v2/calculator/tarifflist"
     payload = {
         "type": 2,
-        "from_location": {"code": 44},           # Москва
-        "to_location": {"code": int(to_city_code)},  # ← используем переданный код города
+        "from_location": {"code": 44},
+        "to_location": {"code": int(to_city_code)},  # используем переданный код города
         "packages": [{"weight": weight_g}],
         "shipment_point": from_pvz,
         "delivery_point": to_pvz
@@ -267,11 +268,18 @@ async def get_available_tariffs(
         return []
 
 
-def choose_tariff(available: List[dict]) -> Optional[int]:
+def choose_tariff(available: List[dict], is_local: bool = True) -> Optional[int]:
     candidates = [t for t in available if t.get('delivery_mode') == 4]
     if not candidates:
         logger.warning("Нет тарифов с delivery_mode=4")
         return None
+
+    # НОВОЕ: Для межгорода исключаем локальные фулфилмент-тарифы (357, 358)
+    if not is_local:
+        candidates = [t for t in candidates if t['tariff_code'] not in [357, 358]]
+        if not candidates:
+            logger.warning("Нет подходящих тарифов для межгорода после исключения локальных")
+            return None
 
     # Предпочтение: 358 > 138 > cheapest любой
     preferred_order = [358, 138]
@@ -314,22 +322,6 @@ async def calculate_cdek_delivery_cost(
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     try:
-        # Проверка на ключевые пустые поля перед отправкой
-        required_fields = [
-            ("shipment_point", payload.get("sender", {}).get("shipment_point")),
-            ("delivery_point", payload.get("delivery_point")),
-            ("sender.company", payload.get("sender", {}).get("company")),
-            ("sender.name", payload.get("sender", {}).get("name")),
-            ("sender.phones", payload.get("sender", {}).get("phones")),
-            ("recipient.name", payload.get("recipient", {}).get("name")),
-            ("recipient.phones", payload.get("recipient", {}).get("phones"))
-        ]
-        for field_name, value in required_fields:
-            if not value:
-                logger.error(f"Пустое обязательное поле: {field_name}")
-                await notify_admin(f"❌ Пустое поле {field_name} в payload для заказа #{order_id}")
-                return False
-
         r = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=15)
         r.raise_for_status()
         data = r.json()
@@ -580,7 +572,7 @@ class NoTGWebhookFilter(logging.Filter):
 
 
 logging.basicConfig(
-    level=logging.WARNING,  # Изменить на WARNING (меньше info)
+    level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
     handlers=[
         logging.handlers.RotatingFileHandler(
@@ -709,15 +701,16 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
         "comment": f"Заказ из бота «ТВОЯ КОРОБОЧКА» #{order_id}",
         "delivery_point": str(pvz_code),
         "delivery_recipient_cost": {"value": 0},
+
+        # НОВОЕ: Верхний уровень для from_location и shipment_point (по docs CDEK v2)
+        "from_location": {"code": 44},  # Москва как from
+        "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE,  # "MSK2296" здесь!
+
         "sender": {
             "company": "ИП Большаков А. М.",
             "name": "Алексей",
             "phones": [{"number": "+79651051779"}],
-            "location": {
-                "code": 44,
-                "address": "Москва, пр-д 2-й Грайвороновский проезд, 42к4"
-            },
-            "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE
+            # УБРАЛИ: "location" и "shipment_point" (не нужны в sender по docs)
         },
         "recipient": {
             "name": user.full_name,
@@ -746,8 +739,8 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
         # "services": [{"code": "INSURANCE", "parameter": Config.PRICE_RUB}]  # Закомментировали
     }
 
-
-    import json
+    # УБРАЛИ: import json (предполагаем, что уже есть в начале файла)
+    # Заменили print на logger
     logger.info(
         f"\n=== ОТПРАВЛЯЕМ В СДЭК ЗАКАЗ #{order_id} ===\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
@@ -2382,6 +2375,8 @@ async def cb_admin_set_shipped(cb: CallbackQuery):
                 to_city_code=str(city_code)
             )
 
+            is_local = (order.extra_data.get("city_code") == Config.CDEK_FROM_CITY_CODE)
+            tariff = choose_tariff(available, is_local=is_local)
             tariff = choose_tariff(available)  # Новая функция
             if not tariff:
                 msg = f"Нет подходящих тарифов для ПВЗ {pvz_code} (город {city_code}). Доступны: {available}"
@@ -4057,6 +4052,11 @@ async def check_all_shipped_orders():
 
             logger.info("Запуск проверки статусов СДЭК...")
             orders_to_check = get_all_orders_by_status(OrderStatus.SHIPPED.value)
+            if not orders_to_check:
+                logger.debug("Нет shipped заказов для проверки")  # Не info, чтобы не спамить
+                await asyncio.sleep(300)
+                continue
+            logger.info(f"Проверяем {len(orders_to_check)} shipped заказов...")
 
             for detached_order in orders_to_check:
                 with Session(engine) as sess:
@@ -4155,6 +4155,12 @@ async def check_pending_timeouts():
                     Order.status == OrderStatus.PENDING_PAYMENT.value,
                     Order.created_at < datetime.now(timezone.utc) - timedelta(seconds=Config.PAYMENT_TIMEOUT_SEC)
                 ).all()
+                # В check_pending_timeouts (перед for order in pending_orders):
+                # НОВОЕ: Лог только если есть
+                if not pending_orders:
+                    logger.debug("Нет pending заказов для таймаута")
+                    await asyncio.sleep(60)
+                    continue
                 logger.info(f"Found {len(pending_orders)} pending orders: {[o.id for o in pending_orders]}")
 
                 for order in pending_orders:
@@ -4445,9 +4451,10 @@ async def telegram_webhook(request: Request):
 
     try:
         json_data = await request.json()
-        logger.debug(f"TG webhook payload: {json_data}")
-
         update = Update(**json_data)
+        if 'error' in json_data:  # Условно
+            logger.debug(f"TG webhook payload (with error): {json_data}")
+
         await dp.feed_update(bot, update)
         logger.info("TG update processed successfully")
         return {"ok": True}
