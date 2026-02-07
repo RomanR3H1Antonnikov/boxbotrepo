@@ -268,19 +268,23 @@ async def get_available_tariffs(
 
 
 def choose_tariff(available: List[dict]) -> Optional[int]:
-    """
-    Выбирает подходящий тариф из списка: mode=4 (склад-склад), минимальный по цене.
-    Предпочтение 358, если доступен.
-    """
-    candidates = [t for t in available if t.get('delivery_mode') == 4]  # склад-склад (для ПВЗ)
+    candidates = [t for t in available if t.get('delivery_mode') == 4]
     if not candidates:
         logger.warning("Нет тарифов с delivery_mode=4")
         return None
 
-    # Сортируем: сначала 358, если есть, иначе min по sum
-    candidates.sort(key=lambda t: (t['tariff_code'] != 358, t['delivery_sum']))  # 358 first, then cheapest
+    # Предпочтение: 358 > 138 > cheapest любой
+    preferred_order = [358, 138]
+    for pref in preferred_order:
+        for t in candidates:
+            if t['tariff_code'] == pref:
+                logger.info(f"Выбран предпочтительный тариф {pref}")
+                return pref
+
+    # Если нет preferred — cheapest
+    candidates.sort(key=lambda t: t['delivery_sum'])
     selected = candidates[0]['tariff_code']
-    logger.info(f"Выбран тариф {selected} из {len(candidates)} кандидатов")
+    logger.info(f"Выбран cheapest тариф {selected} (нет 358/138)")
     return selected
 
 
@@ -310,6 +314,22 @@ async def calculate_cdek_delivery_cost(
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     try:
+        # Проверка на ключевые пустые поля перед отправкой
+        required_fields = [
+            ("shipment_point", payload.get("sender", {}).get("shipment_point")),
+            ("delivery_point", payload.get("delivery_point")),
+            ("sender.company", payload.get("sender", {}).get("company")),
+            ("sender.name", payload.get("sender", {}).get("name")),
+            ("sender.phones", payload.get("sender", {}).get("phones")),
+            ("recipient.name", payload.get("recipient", {}).get("name")),
+            ("recipient.phones", payload.get("recipient", {}).get("phones"))
+        ]
+        for field_name, value in required_fields:
+            if not value:
+                logger.error(f"Пустое обязательное поле: {field_name}")
+                await notify_admin(f"❌ Пустое поле {field_name} в payload для заказа #{order_id}")
+                return False
+
         r = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=15)
         r.raise_for_status()
         data = r.json()
@@ -689,17 +709,10 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
         "comment": f"Заказ из бота «ТВОЯ КОРОБОЧКА» #{order_id}",
         "delivery_point": str(pvz_code),
         "delivery_recipient_cost": {"value": 0},
-        "to_location": {
-            "address": address,
-            "postal_code": postal_code,
-            "code": int(city_code) if city_code else None
-        },
         "sender": {
-            "contact": {
-                "company": "ИП Большаков А. М.",
-                "name": "Алексей",
-                "phones": [{"number": "+79651051779"}]
-            },
+            "company": "ИП Большаков А. М.",
+            "name": "Алексей",
+            "phones": [{"number": "+79651051779"}],
             "location": {
                 "code": 44,
                 "address": "Москва, пр-д 2-й Грайвороновский проезд, 42к4"
@@ -707,12 +720,11 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
             "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE
         },
         "recipient": {
-            "contact": {
-                "name": user.full_name,
-                "phones": [{
-                    "number": user.phone.replace("+", "").replace(" ", "").replace("-", "")
-                }]
-            }
+            "name": user.full_name,
+            "phones": [{
+                "number": "+" + user.phone.replace("+", "").replace(" ", "").replace("-", "")
+            }],
+            "delivery_point": str(pvz_code)  # Добавили как в примере
         },
         "packages": [{
             "number": f"BOX{order_id}",
@@ -721,6 +733,7 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
             "width": Config.PACKAGE_WIDTH_CM,
             "height": Config.PACKAGE_HEIGHT_CM,
             "comment": "Подарочная коробочка с антистресс-набором",
+            "date_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "items": [{
                 "name": "Коробочка «Отпусти тревогу»",
                 "ware_key": f"BOX{order_id}",
