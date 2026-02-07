@@ -435,6 +435,7 @@ class OrderStatus(Enum):
     PAID_PARTIALLY = "paid_partially"  # После предоплаты 30%
     PAID_FULL = "paid_full"            # После полной оплаты или дооплаты
     ASSEMBLED = "assembled"           # Собран админом
+    CDEK_PENDING_REGISTRATION = "cdek_pending"  # Заказ создан в CDEK, но ждём реального трек-номера
     SHIPPED = "shipped"                # Отправлен (CDEK создан)
     ARCHIVED = "archived"              # Завершён
     ABANDONED = "abandoned"            # Отменён
@@ -707,7 +708,6 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
             "company": "ИП Большаков А. М.",
             "name": "Алексей",
             "phones": [{"number": "+79651051779"}],
-            # УДАЛИТЬ: "location": {"code": 44},  # ← это вызывало v2_shipment_address_multivalued
         },
         "recipient": {
             "name": user.full_name,
@@ -758,10 +758,7 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
         logger.info(f"СДЭК ответил: {r.status_code}\n{r.text[:2000]}")
 
         if r.status_code not in (200, 201, 202):
-            await notify_admin(
-                f"❌ СДЭК ошибка для заказа #{order_id}\n"
-                f"{r.status_code}\n{r.text[:1000]}"
-            )
+            await notify_admin(...)
             return False
 
         data = r.json()
@@ -771,34 +768,152 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
             logger.error(f"СДЭК не вернул uuid для заказа #{order_id}")
             return False
 
+        # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+        # СЮДА ВСТАВИТЬ ВЕСЬ БЛОК СОХРАНЕНИЯ UUID И ЗАПУСКА POLLING
+        # ================== 4. СОХРАНЯЕМ UUID В БД ==================
+        with Session(engine) as sess:  # Новая сессия для записи
+            order = sess.get(Order, order_id)  # Перезагружаем свежий объект
+            if not order:
+                return False
+            if order.extra_data is None:
+                order.extra_data = {}
+            order.extra_data["cdek_uuid"] = uuid
+            flag_modified(order, "extra_data")  # Маркируем как изменённый
+            order.track = uuid  # Временно сохраняем uuid как track (для UI)
+            order.status = OrderStatus.CDEK_PENDING_REGISTRATION.value  # Новый статус
+            sess.commit()  # Коммитим
+
+        logger.info(f"СДЭК: ЗАКАЗ #{order_id} ПРИНЯТ (202 Accepted) | UUID: {uuid} → запускаем polling")
+
+        asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt=0, max_attempts=18))
+
+        await notify_admin(
+            f"Заказ #{order_id} → зарегистрирован асинхронно (202)\n"
+            f"UUID: {uuid}\nОжидаем настоящий трек-номер..."
+        )
+
+        await bot.send_message(
+            order.user_id,
+            f"Заказ #{order_id} передан в СДЭК и регистрируется...\n"
+            f"Трек-номер придёт автоматически через 1–3 минуты."
+        )
+
+        return True
+
     except Exception as e:
         logger.exception(f"Исключение при создании заказа СДЭК #{order_id}")
         await notify_admin(f"❌ Исключение при создании заказа СДЭК #{order_id}\n{e}")
         return False
 
-    # ================== 4. СОХРАНЯЕМ UUID В БД ==================
-    with Session(engine) as sess:  # Новая сессия для записи
-        order = sess.get(Order, order_id)  # Перезагружаем свежий объект
-        if not order:
-            return False
-        if order.extra_data is None:
-            order.extra_data = {}
-        order.extra_data["cdek_uuid"] = uuid
-        flag_modified(order, "extra_data")  # Маркируем как изменённый
-        order.track = uuid
-        order.status = OrderStatus.SHIPPED.value
-        sess.commit()  # Коммитим в этой сессии
+    logger.info(f"СДЭК: ЗАКАЗ #{order_id} ПРИНЯТ (202 Accepted) | UUID: {uuid} → запускаем polling")
 
-    logger.info(f"СДЭК: ЗАКАЗ #{order_id} ПРИНЯТ | UUID: {uuid}")
+    asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt=0, max_attempts=18))
 
+    # Уведомляем админа и клиента о промежуточном статусе
     await notify_admin(
-        f"🚚 Заказ #{order_id} успешно принят СДЭК\n"
-        f"UUID: {uuid}\n"
-        f"Трек-номер придёт автоматически."
+        f"Заказ #{order_id} → зарегистрирован асинхронно (202)\n"
+        f"UUID: {uuid}\nОжидаем настоящий трек-номер..."
+    )
+
+    # Клиенту: покажем в UI "регистрируется"
+    await bot.send_message(
+        order.user_id,
+        f"Заказ #{order_id} передан в СДЭК и регистрируется...\n"
+        f"Трек-номер придёт автоматически через 1–3 минуты."
     )
 
     return True
 
+
+async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max_attempts: int = 18):
+    """
+    Проверяет статус заказа по uuid каждые ~10–15 сек до 3 минут.
+    Если появился настоящий number → сохраняем его как track и уведомляем.
+    """
+    if attempt >= max_attempts:
+        logger.warning(f"Превышено кол-во попыток ({max_attempts}) для uuid {uuid} заказа #{order_id}")
+        await notify_admin(
+            f"Заказ #{order_id} (uuid {uuid}): не удалось получить номер заказа после {max_attempts} попыток")
+        return
+
+    token = await get_cdek_prod_token()
+    if not token:
+        logger.error(f"Нет токена для проверки uuid {uuid}")
+        await asyncio.sleep(30)  # ждём подольше при проблеме с токеном
+        asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
+        return
+
+    url = f"https://api.cdek.ru/v2/orders/{uuid}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        r = await asyncio.to_thread(requests.get, url, headers=headers, timeout=12)
+
+        if r.status_code == 401:
+            logger.error(f"401 при проверке uuid {uuid} — токен недействителен или неверный")
+            await notify_admin(f"401 Unauthorized при проверке uuid {uuid} заказа #{order_id}")
+            await asyncio.sleep(60)  # ждём минуту, возможно токен обновится
+            asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
+            return
+
+        if r.status_code != 200:
+            logger.warning(f"Статус {r.status_code} при проверке uuid {uuid}: {r.text[:300]}")
+            await asyncio.sleep(15)
+            asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
+            return
+
+        info = r.json()
+        number = info.get("number") or info.get("cdek_number")
+        status_code = info.get("status", {}).get("code")
+        status_desc = info.get("status", {}).get("description", "—")
+
+        logger.info(
+            f"Попытка {attempt + 1}/{max_attempts} | uuid {uuid} → number={number}, status={status_code} ({status_desc})")
+
+        if number and number != f"BOX{order_id}":  # фильтруем наш временный плейсхолдер
+            engine = make_engine(Config.DB_PATH)  # локально создаём engine
+            with Session(engine) as sess:
+                order = sess.get(Order, order_id)
+                if not order:
+                    logger.error(f"Заказ #{order_id} исчез во время polling")
+                    return
+
+                order.track = number
+                if not order.extra_data:
+                    order.extra_data = {}
+                order.extra_data["cdek_number"] = number
+                order.extra_data["cdek_final_status"] = status_code
+                order.status = OrderStatus.SHIPPED.value  # Теперь финальный SHIPPED
+                flag_modified(order, "extra_data")
+                sess.commit()
+
+            # Уведомления (как раньше, но добавим статус)
+            await bot.send_message(
+                order.user_id,
+                f"Посылка отправлена! 🚚\n\n"
+                f"Трек-номер: <code>{number}</code>\n"
+                f"<a href='https://www.cdek.ru/ru/tracking?order_id={number}'>Отследить посылку</a>",
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=kb_order_status(order)
+            )
+
+            await notify_admin(
+                f"Заказ #{order_id} → настоящий трек-номер получен: {number}\n"
+                f"Статус: {status_desc} ({status_code})"
+            )
+
+            return  # Успех → выходим
+
+        # Если number ещё нет — пробуем снова
+        delay = 10 + attempt * 2  # увеличиваем интервал: 10 → 12 → 14... сек
+        await asyncio.sleep(delay)
+        asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
+
+    except Exception as e:
+        logger.exception(f"Ошибка в poll_cdek_order_status (попытка {attempt + 1}) для uuid {uuid}")
+        await asyncio.sleep(20)
+        asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
 
 
 def validate_data(full_name: str, phone: str, email: str) -> tuple[bool, str]:
@@ -1382,11 +1497,18 @@ def format_client_order_info(order: Order) -> str:
 
     # Трек
     if order.track and order.track not in ("—", None, ""):
-        lines += [
-            "",
-            f"📮 <b>Трек-номер:</b> <code>{order.track}</code>",
-            f'<a href="https://www.cdek.ru/ru/tracking?order_id={order.track}">Отследить посылку</a>',
-        ]
+        if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', order.track, re.I):
+            lines += [
+                "",
+                f"📮 <b>Трек-номер:</b> Регистрация в СДЭК...\n"
+                f"Трек-номер придёт автоматически через 1–3 минуты."
+            ]
+        else:
+            lines += [
+                "",
+                f"📮 <b>Трек-номер:</b> <code>{order.track}</code>",
+                f'<a href="https://www.cdek.ru/ru/tracking?order_id={order.track}">Отследить посылку</a>',
+            ]
 
     return "\n".join(lines)
 
@@ -4053,6 +4175,12 @@ async def check_all_shipped_orders():
                     order: Optional[Order] = sess.get(Order, detached_order.id)  # Reload fresh
                     if order is None:
                         continue
+
+                    if order.status == OrderStatus.SHIPPED.value and re.match(
+                            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', order.track or '', re.I):
+                        logger.info(f"Заказ #{order.id} в SHIPPED, но track=uuid ({order.track}) → перезапуск polling")
+                        asyncio.create_task(poll_cdek_order_status(order.extra_data.get("cdek_uuid"), order.id))
+                        continue  # Пропускаем дальнейшую проверку, т.к. polling сам обновит
 
                     uuid = order.extra_data.get("cdek_uuid")
                     if not uuid:
