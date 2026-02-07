@@ -665,7 +665,7 @@ async def create_yookassa_payment(order: Order, amount_rub: int, description: st
             return None
 
 
-async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # Добавили param с default 358
+async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:
     token = await get_cdek_prod_token()
     if not token:
         logger.error("Нет токена СДЭК")
@@ -673,28 +673,33 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
 
     engine = make_engine(Config.DB_PATH)
 
+    # 1. Получаем order и user_id один раз, безопасно
     with Session(engine) as sess:
         order = sess.get(Order, order_id)
         if not order:
             logger.error(f"Заказ #{order_id} не найден")
             return False
 
-        sess.refresh(order)
+        sess.refresh(order)  # на всякий случай актуализируем
 
         pvz_code = order.extra_data.get("pvz_code")
         if not pvz_code:
             logger.error(f"Нет pvz_code для заказа #{order.id}")
             return False
 
-        user = get_user_by_id(sess, order.user_id)
-        if not user or not user.full_name or not user.phone:
-            logger.error(f"Нет данных пользователя для заказа #{order.id}")
+        user_id = order.user_id
+        full_name = order.user.full_name if order.user else None
+        phone = order.user.phone if order.user else None
+
+        if not full_name or not phone:
+            logger.error(f"Нет полных данных пользователя для заказа #{order.id}")
             return False
 
         address = order.address or "ПВЗ СДЭК"
         postal_code = order.extra_data.get("postal_code", "000000")
         city_code = order.extra_data.get("city_code", "44")
 
+    # 2. Формируем payload
     payload = {
         "type": 2,
         "number": f"BOX{order_id}",
@@ -710,8 +715,8 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
             "phones": [{"number": "+79651051779"}],
         },
         "recipient": {
-            "name": user.full_name,
-            "phones": [{"number": "+" + user.phone.replace("+", "").replace(" ", "").replace("-", "")}],
+            "name": full_name,
+            "phones": [{"number": "+" + phone.replace("+", "").replace(" ", "").replace("-", "")}],
         },
         "packages": [{
             "number": f"BOX{order_id}",
@@ -745,7 +750,6 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
 
     url = "https://api.cdek.ru/v2/orders"
 
-    # ================== 3. HTTP-запрос ==================
     try:
         r = await asyncio.to_thread(
             requests.post,
@@ -758,7 +762,10 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
         logger.info(f"СДЭК ответил: {r.status_code}\n{r.text[:2000]}")
 
         if r.status_code not in (200, 201, 202):
-            await notify_admin(...)
+            await notify_admin(
+                f"❌ СДЭК ошибка для заказа #{order_id}\n"
+                f"{r.status_code}\n{r.text[:1000]}"
+            )
             return False
 
         data = r.json()
@@ -768,32 +775,34 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
             logger.error(f"СДЭК не вернул uuid для заказа #{order_id}")
             return False
 
-        # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-        # СЮДА ВСТАВИТЬ ВЕСЬ БЛОК СОХРАНЕНИЯ UUID И ЗАПУСКА POLLING
-        # ================== 4. СОХРАНЯЕМ UUID В БД ==================
-        with Session(engine) as sess:  # Новая сессия для записи
-            order = sess.get(Order, order_id)  # Перезагружаем свежий объект
+        # 3. Сохраняем UUID и запускаем polling
+        with Session(engine) as sess:
+            order = sess.get(Order, order_id)
             if not order:
+                logger.error(f"Заказ #{order_id} исчез перед сохранением UUID")
                 return False
+
             if order.extra_data is None:
                 order.extra_data = {}
+
             order.extra_data["cdek_uuid"] = uuid
-            flag_modified(order, "extra_data")  # Маркируем как изменённый
-            order.track = uuid  # Временно сохраняем uuid как track (для UI)
-            order.status = OrderStatus.CDEK_PENDING_REGISTRATION.value  # Новый статус
-            sess.commit()  # Коммитим
+            flag_modified(order, "extra_data")
+            order.track = uuid  # временно для UI
+            order.status = OrderStatus.CDEK_PENDING_REGISTRATION.value
+            sess.commit()
 
         logger.info(f"СДЭК: ЗАКАЗ #{order_id} ПРИНЯТ (202 Accepted) | UUID: {uuid} → запускаем polling")
 
         asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt=0, max_attempts=18))
 
+        # Уведомления
         await notify_admin(
             f"Заказ #{order_id} → зарегистрирован асинхронно (202)\n"
             f"UUID: {uuid}\nОжидаем настоящий трек-номер..."
         )
 
         await bot.send_message(
-            order.user_id,
+            user_id,
             f"Заказ #{order_id} передан в СДЭК и регистрируется...\n"
             f"Трек-номер придёт автоматически через 1–3 минуты."
         )
@@ -804,25 +813,6 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
         logger.exception(f"Исключение при создании заказа СДЭК #{order_id}")
         await notify_admin(f"❌ Исключение при создании заказа СДЭК #{order_id}\n{e}")
         return False
-
-    logger.info(f"СДЭК: ЗАКАЗ #{order_id} ПРИНЯТ (202 Accepted) | UUID: {uuid} → запускаем polling")
-
-    asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt=0, max_attempts=18))
-
-    # Уведомляем админа и клиента о промежуточном статусе
-    await notify_admin(
-        f"Заказ #{order_id} → зарегистрирован асинхронно (202)\n"
-        f"UUID: {uuid}\nОжидаем настоящий трек-номер..."
-    )
-
-    # Клиенту: покажем в UI "регистрируется"
-    await bot.send_message(
-        order.user_id,
-        f"Заказ #{order_id} передан в СДЭК и регистрируется...\n"
-        f"Трек-номер придёт автоматически через 1–3 минуты."
-    )
-
-    return True
 
 
 async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max_attempts: int = 18):
