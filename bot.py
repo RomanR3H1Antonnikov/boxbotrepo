@@ -695,29 +695,25 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:  # �
         city_code = order.extra_data.get("city_code", "44")
 
     payload = {
-        "type": 2,  # Оставляем 2 (для ИМ, по рекомендации поддержки)
+        "type": 2,
         "number": f"BOX{order_id}",
-        "tariff_code": tariff_code,  # Теперь динамический
+        "tariff_code": tariff_code,
         "comment": f"Заказ из бота «ТВОЯ КОРОБОЧКА» #{order_id}",
         "delivery_point": str(pvz_code),
         "delivery_recipient_cost": {"value": 0},
-
-        # НОВОЕ: Верхний уровень для from_location и shipment_point (по docs CDEK v2)
-        "from_location": {"code": 44},  # Москва как from
-        "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE,  # "MSK2296" здесь!
+        "from_location": {"code": 44},  # from city
+        "to_location": {"code": int(city_code)},
+        "shipment_point": Config.CDEK_SHIPMENT_POINT_CODE,
 
         "sender": {
             "company": "ИП Большаков А. М.",
             "name": "Алексей",
             "phones": [{"number": "+79651051779"}],
-            # УБРАЛИ: "location" и "shipment_point" (не нужны в sender по docs)
+            "location": {"code": 44},
         },
         "recipient": {
             "name": user.full_name,
-            "phones": [{
-                "number": "+" + user.phone.replace("+", "").replace(" ", "").replace("-", "")
-            }],
-            "delivery_point": str(pvz_code)  # Добавили как в примере
+            "phones": [{"number": "+" + user.phone.replace("+", "").replace(" ", "").replace("-", "")}],
         },
         "packages": [{
             "number": f"BOX{order_id}",
@@ -2377,7 +2373,6 @@ async def cb_admin_set_shipped(cb: CallbackQuery):
 
             is_local = (order.extra_data.get("city_code") == Config.CDEK_FROM_CITY_CODE)
             tariff = choose_tariff(available, is_local=is_local)
-            tariff = choose_tariff(available)  # Новая функция
             if not tariff:
                 msg = f"Нет подходящих тарифов для ПВЗ {pvz_code} (город {city_code}). Доступны: {available}"
                 logger.warning(msg)
@@ -4387,7 +4382,7 @@ async def yookassa_webhook(request: Request):
                 elif kind == "pre":
                     order.payment_kind = "pre"
                     order.status = OrderStatus.PAID_PARTIALLY.value
-                if kind == "rem":
+                elif kind == "rem":
                     order.payment_kind = "remainder"
                     order.status = OrderStatus.PAID_FULL.value
 
