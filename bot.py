@@ -722,7 +722,7 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:
         "sender": {
             "company": "ИП Большаков А. М.",
             "name": "Алексей",
-            "phones": [{"number": "+79651051779"}],
+            "phones": [{"number": "+79104162889"}],
         },
         "recipient": {
             "name": full_name,
@@ -1330,11 +1330,17 @@ def kb_ready_message(order: Order) -> InlineKeyboardMarkup:
 def kb_order_status(order: Order) -> InlineKeyboardMarkup:
     buttons = []
 
-    # Отслеживание — всегда, если есть трек
-    if order.track:
+    # Отслеживание — только если трек реальный (не UUID и не пустой)
+    if order.track and order.track not in ("—", None, "") and not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', order.track, re.I):
         buttons.append([{
             "text": "Отследить посылку",
             "url": f"https://www.cdek.ru/ru/tracking?order_id={order.track}"
+        }])
+    elif order.status == OrderStatus.CDEK_PENDING_REGISTRATION.value:
+        # Placeholder для pending
+        buttons.append([{
+            "text": "Заказ обрабатывается, трек скоро придёт!",
+            "callback_data": "noop"  # Просто закрыть, без действия
         }])
 
     show_remainder = (
@@ -1444,6 +1450,7 @@ def format_client_order_info(order: Order) -> str:
         OrderStatus.PAID_PARTIALLY.value: "✅ Предоплачен (30%), ждём сборки",
         OrderStatus.PAID_FULL.value: "💳 Полностью оплачен, ждём сборки",
         OrderStatus.ASSEMBLED.value: "📦 Собран - ждём дооплату" if order.payment_kind == "pre" else "📦 Собран - скоро отправим",
+        OrderStatus.CDEK_PENDING_REGISTRATION: "⏳ Обрабатывается СДЭКом",
         OrderStatus.SHIPPED.value: "🚚 Отправлен",
         OrderStatus.ARCHIVED.value: "✅ Доставлен и завершён",
         OrderStatus.ABANDONED.value: "❌ Отменён",
@@ -1513,7 +1520,7 @@ def format_client_order_info(order: Order) -> str:
         if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', order.track, re.I):
             lines += [
                 "",
-                f"📮 <b>Трек-номер:</b> Регистрация в СДЭК...\n"
+                f"📮 <b>Трек-номер:</b> Заказ обрабатывается в СДЭК...\n"
                 f"Трек-номер придёт автоматически через 1–3 минуты."
             ]
         else:
