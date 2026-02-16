@@ -877,7 +877,7 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
             asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
             return
 
-        # Проверка на глобальные ошибки (они могут быть на верхнем уровне)
+        # Проверка на глобальные ошибки (на верхнем уровне)
         errors = info.get("errors", [])
         if errors:
             err_msg = "; ".join([f"{e.get('code', '—')}: {e.get('message', '—')}" for e in errors])
@@ -894,17 +894,16 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
                 await notify_admin(f"❌ Ошибки в запросе CDEK для #{order_id} (uuid {uuid}): {err_msg}")
                 return
 
-        # ───────────────────────────────────────────────
-        # КОРРЕКТНОЕ извлечение данных — всё из entity!
-        # ───────────────────────────────────────────────
-        cdek_number = info.get("cdek_number")
-        internal_number = info.get("number")
-        status_code = info.get("status", {}).get("code")
+        cdek_number = entity.get("cdek_number")
+        internal_number = entity.get("number")
+        status_obj = entity.get("status", {})
+        status_code = status_obj.get("code")
+        status_desc = status_obj.get("description", "—")
 
         logger.info(
             f"Попытка {attempt + 1}/{max_attempts} | uuid {uuid} → "
             f"internal={internal_number} | cdek_number={cdek_number} | "
-            f"status={status_code}"
+            f"status={status_code} ({status_desc})"
         )
 
         # Успех — появился настоящий cdek_number
@@ -937,7 +936,7 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
 
             await notify_admin(
                 f"✅ Заказ #{order_id} → реальный трек получен: {cdek_number}\n"
-                f"Статус: {status_code}"
+                f"Статус: {status_desc} ({status_code})"
             )
 
             return  # Успех — выходим
@@ -4215,8 +4214,10 @@ async def check_all_shipped_orders():
                     # Если трек всё ещё UUID — перезапускаем polling
                     if order.status == OrderStatus.SHIPPED.value and re.match(
                             r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', order.track or '', re.I):
-                        logger.info(f"Заказ #{order.id} в SHIPPED, но track=uuid → перезапуск polling")
-                        asyncio.create_task(poll_cdek_order_status(order.extra_data.get("cdek_uuid"), order.id))
+                        uuid_to_poll = order.extra_data.get("cdek_uuid")
+                        if uuid_to_poll:
+                            logger.info(f"Заказ #{order.id} в SHIPPED, но track=uuid → перезапуск polling")
+                            asyncio.create_task(poll_cdek_order_status(uuid_to_poll, order.id))
                         continue
 
                     uuid = order.extra_data.get("cdek_uuid")
@@ -4230,16 +4231,22 @@ async def check_all_shipped_orders():
                     # ───────────────────────────────────────────────
                     # Самое важное — entity!
                     # ───────────────────────────────────────────────
-                    entity = info.get("entity", {})
+                    entity = info  # ← потому что get_cdek_order_info уже возвращает entity
                     if not entity:
-                        logger.warning(f"Нет 'entity' в ответе для заказа #{order.id} (uuid {uuid})")
+                        logger.warning(f"Нет данных (entity) в ответе для заказа #{order.id} (uuid {uuid})")
                         continue
 
-                    cdek_number   = entity.get("cdek_number")
+                    cdek_number     = entity.get("cdek_number")
                     internal_number = entity.get("number")
+                    status_obj      = entity.get("status", {})
+                    current_status_desc = status_obj.get("description", "")
 
-                    logger.info(f"check_all: #{order.id} → internal={internal_number} | cdek_number={cdek_number}")
+                    logger.info(
+                        f"check_all: #{order.id} → internal={internal_number} | "
+                        f"cdek_number={cdek_number} | status={current_status_desc}"
+                    )
 
+                    # Сохраняем трек-номер, если он появился и ещё не сохранён
                     if cdek_number and len(str(cdek_number)) >= 8 and (not order.track or order.track.startswith("BOX")):
                         order.track = cdek_number
                         if not order.extra_data:
@@ -4272,9 +4279,6 @@ async def check_all_shipped_orders():
                         "Возврат",
                         "Неудачная попытка вручения"
                     ]
-
-                    status_obj = entity.get("status", {})
-                    current_status_desc = status_obj.get("description", "")
 
                     if (current_status_desc in important_statuses and
                         current_status_desc != last_status_cache.get(order.id)):
