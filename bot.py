@@ -1215,7 +1215,7 @@ async def notify_client_order_shipped(order_id: int, message: Message):
         text,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=kb_order_status_by_id(order)
+        reply_markup=await kb_order_status_by_id(order.id)
     )
 
 
@@ -2249,7 +2249,7 @@ async def cb_order_status(cb: CallbackQuery):
             text,
             parse_mode="HTML",
             disable_web_page_preview=True,
-            reply_markup=kb_order_status_by_id(order)
+            reply_markup=await kb_order_status_by_id(order.id)
         )
         await cb.answer()
     except Exception as e:
@@ -4428,7 +4428,7 @@ async def handle_payment_success(message: Message):
         # Проверяем, не оплачен ли уже
         if order.status in (OrderStatus.PAID_FULL.value, OrderStatus.SHIPPED.value, OrderStatus.ARCHIVED.value):
             await message.answer("Заказ уже оплачен и обрабатывается ❤️")
-            await message.answer(format_client_order_info(order), reply_markup=kb_order_status_by_id(order))
+            await message.answer(format_client_order_info(order), reply_markup=await kb_order_status_by_id(order.id))
             return
 
         # Критично: проверяем реальный статус платежа в ЮKассе
@@ -4486,7 +4486,7 @@ async def handle_payment_success(message: Message):
             await message.answer("Ошибка проверки оплаты. Админ уже уведомлён, скоро разберёмся.")
 
     await message.answer(text)
-    await message.answer(format_client_order_info(order), reply_markup=kb_order_status_by_id(order))
+    await message.answer(format_client_order_info(order), reply_markup=await kb_order_status_by_id(order.id))
 
 
 # ───────────────────────────────────────────────
@@ -4584,7 +4584,7 @@ async def yookassa_webhook(request: Request):
                     f"✅ Оплата прошла успешно! Заказ <b>#{order.id}</b> принят в обработку.\n\n"
                     f"Статус обновлён автоматически.",
                     parse_mode="HTML",
-                    reply_markup=kb_order_status_by_id(order)
+                    reply_markup=await kb_order_status_by_id(order.id)
                 )
 
                 logger.info(f"Успешно обработан payment.succeeded для заказа #{order.id} → {order.status}")
