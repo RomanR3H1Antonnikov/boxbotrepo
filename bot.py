@@ -235,9 +235,9 @@ async def get_cdek_prod_token() -> Optional[str]:
 
 
 async def get_available_tariffs(
-    from_pvz: str,           # код пункта отгрузки (MSK2296)
-    to_pvz: str,             # код ПВЗ получателя
-    to_city_code: str,       # ← добавили явно код города получателя
+    from_pvz: str,
+    to_pvz: str,
+    to_city_code: str,
     weight_g: int = 750
 ) -> list:
     token = await get_cdek_prod_token()
@@ -246,10 +246,15 @@ async def get_available_tariffs(
 
     url = "https://api.cdek.ru/v2/calculator/tarifflist"
     payload = {
-        "type": 2,
-        "from_location": {"code": 44},
-        "to_location": {"code": int(to_city_code)},  # используем переданный код города
-        "packages": [{"weight": weight_g}],
+        "type": 1,
+        "from_location": {"code": int(Config.CDEK_FROM_CITY_CODE)},
+        "to_location": {"code": int(to_city_code)},
+        "packages": [{
+            "weight": weight_g,
+            "length": Config.PACKAGE_LENGTH_CM,
+            "width": Config.PACKAGE_WIDTH_CM,
+            "height": Config.PACKAGE_HEIGHT_CM,
+        }],
         "shipment_point": from_pvz,
         "delivery_point": to_pvz
     }
@@ -258,42 +263,41 @@ async def get_available_tariffs(
         r = requests.post(url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=10)
         if r.status_code == 200:
             tariffs = r.json().get("tariff_codes", [])
-            logger.info(f"Доступные тарифы для {to_pvz} (город {to_city_code}): {tariffs}")
+            logger.info(f"Доступные тарифы для {to_pvz} (город {to_city_code}): {len(tariffs)} шт. Первый: {tariffs[0] if tariffs else '—'}")
             return tariffs
         else:
-            logger.warning(f"tarifflist ошибка {r.status_code}: {r.text[:400]}")
+            logger.warning(f"tarifflist ошибка {r.status_code}: {r.text[:600]}")
             return []
     except Exception as e:
-        logger.error(f"Ошибка запроса tarifflist: {e}")
+        logger.error(f"Ошибка tarifflist: {e}")
         return []
 
 
-def choose_tariff(available: List[dict], is_local: bool = True) -> Optional[int]:
-    candidates = [t for t in available if t.get('delivery_mode') == 4]
-    if not candidates:
-        logger.warning("Нет тарифов с delivery_mode=4")
+def choose_tariff(available: List[dict]) -> Optional[int]:
+    if not available:
         return None
 
-    # НОВОЕ: Для межгорода исключаем локальные фулфилмент-тарифы (357, 358)
-    if not is_local:
-        candidates = [t for t in candidates if t['tariff_code'] not in [357, 358]]
-        if not candidates:
-            logger.warning("Нет подходящих тарифов для межгорода после исключения локальных")
-            return None
+    # Приоритет для юрлица ПВЗ→ПВЗ по России (именно то, что тебе нужно)
+    preferred_order = [62, 482, 3, 57, 58, 138, 123]   # 62 — лучший баланс цена/скорость
 
-    # Предпочтение: 358 > 138 > cheapest любой
-    preferred_order = [358, 138]
     for pref in preferred_order:
-        for t in candidates:
-            if t['tariff_code'] == pref:
-                logger.info(f"Выбран предпочтительный тариф {pref}")
+        for t in available:
+            if t.get('tariff_code') == pref:
+                logger.info(f"✅ Выбран тариф {pref} — {t.get('tariff_name', '')}")
                 return pref
 
-    # Если нет preferred — cheapest
-    candidates.sort(key=lambda t: t['delivery_sum'])
-    selected = candidates[0]['tariff_code']
-    logger.info(f"Выбран cheapest тариф {selected} (нет 358/138)")
-    return selected
+    # Fallback — любой самый дешёвый ПВЗ-ПВЗ (delivery_mode=4)
+    candidates = [t for t in available if t.get('delivery_mode') == 4]
+    if candidates:
+        candidates.sort(key=lambda t: t.get('delivery_sum', 999999))
+        selected = candidates[0]['tariff_code']
+        logger.info(f"Выбран cheapest ПВЗ-ПВЗ тариф {selected}")
+        return selected
+
+    # Совсем последний fallback
+    cheapest = min(available, key=lambda t: t.get('delivery_sum', 999999))
+    logger.info(f"Fallback на любой тариф {cheapest['tariff_code']}")
+    return cheapest['tariff_code']
 
 
 async def calculate_cdek_delivery_cost(
@@ -665,7 +669,7 @@ async def create_yookassa_payment(order: Order, amount_rub: int, description: st
             return None
 
 
-async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:
+async def create_cdek_order(order_id: int, tariff_code: int) -> bool:
     token = await get_cdek_prod_token()
     if not token:
         logger.error("Нет токена СДЭК")
@@ -711,7 +715,7 @@ async def create_cdek_order(order_id: int, tariff_code: int = 358) -> bool:
 
     # 2. Формируем payload
     payload = {
-        "type": 2,
+        "type": 1,
         "number": f"BOX{order_id}",
         "tariff_code": tariff_code,
         "comment": f"Заказ из бота «ТВОЯ КОРОБОЧКА» #{order_id}",
@@ -2509,7 +2513,7 @@ async def cb_admin_set_shipped(cb: CallbackQuery):
             )
 
             is_local = (order.extra_data.get("city_code") == Config.CDEK_FROM_CITY_CODE)
-            tariff = choose_tariff(available, is_local=is_local)
+            tariff = choose_tariff(available)
             if not tariff:
                 msg = f"Нет подходящих тарифов для ПВЗ {pvz_code} (город {city_code}). Доступны: {available}"
                 logger.warning(msg)
