@@ -171,7 +171,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 
-app.add_middleware(LoggingMiddleware)
+app.add_middleware(LoggingMiddleware)  # type: ignore
 
 # Проверяем, что ключи загрузились
 if not Configuration.account_id or not Configuration.secret_key:
@@ -834,18 +834,81 @@ async def create_cdek_order(order_id: int, tariff_code: int) -> bool:
         return False
 
 
-async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max_attempts: int = 60):
+async def kb_order_status_by_id(order_id: int) -> InlineKeyboardMarkup:
+    """
+    Возвращает клавиатуру статуса заказа по order_id.
+    Всегда работает с новой сессией, чтобы избежать DetachedInstanceError.
+    """
+    engine = make_engine(Config.DB_PATH)
+
+    with Session(engine) as sess:
+        order = sess.get(Order, order_id)
+        if not order:
+            # Fallback на случай, если заказ удалён или не существует
+            logger.warning(f"Заказ #{order_id} не найден при генерации клавиатуры kb_order_status_by_id")
+            return create_inline_keyboard([
+                [{"text": "В меню", "callback_data": CallbackData.MENU.value}]
+            ])
+
+        buttons = []
+
+        # ───────────────────────────────────────────────
+        # Кнопка отслеживания — только если есть реальный трек (не UUID)
+        # ───────────────────────────────────────────────
+        if order.track and order.track not in ("—", None, ""):
+            if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', order.track, re.IGNORECASE):
+                buttons.append([{
+                    "text": "Отследить посылку",
+                    "url": f"https://www.cdek.ru/ru/tracking?order_id={order.track}"
+                }])
+            else:
+                # UUID ещё не сменился на настоящий трек
+                buttons.append([{
+                    "text": "Заказ обрабатывается, трек скоро придёт!",
+                    "callback_data": "noop"
+                }])
+
+        # ───────────────────────────────────────────────
+        # Кнопка дооплаты (если предоплата и статус позволяет)
+        # ───────────────────────────────────────────────
+        show_remainder = (
+                order.payment_kind == "pre" and
+                order.status in (OrderStatus.PAID_PARTIALLY.value, OrderStatus.ASSEMBLED.value) and
+                (order.remainder_amount or 0) > 0
+        )
+
+        if show_remainder:
+            # Предполагаем, что remainder_amount хранится в рублях (не копейках)
+            remainder_rub = order.remainder_amount
+            buttons.append([{
+                "text": f"Оплатить остаток ({remainder_rub} ₽)",
+                "callback_data": f"pay:rem:{order.id}"
+            }])
+
+        # ───────────────────────────────────────────────
+        # Постоянные кнопки
+        # ───────────────────────────────────────────────
+        buttons.append([{
+            "text": "Информация о заказе",
+            "callback_data": f"order:{order.id}"
+        }])
+        buttons.append([{
+            "text": "В меню",
+            "callback_data": CallbackData.MENU.value
+        }])
+
+        return create_inline_keyboard(buttons)
+
+
+async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max_attempts: int = 18):
     if attempt >= max_attempts:
-        logger.warning(f"Превышено кол-во попыток ({max_attempts}) для uuid {uuid} заказа #{order_id}")
-        await notify_admin(
-            f"Заказ #{order_id} (uuid {uuid}): не удалось получить номер заказа после {max_attempts} попыток")
+        logger.warning(f"Превышено кол-во попыток для uuid {uuid} заказа #{order_id}")
         return
 
     token = await get_cdek_prod_token()
     if not token:
-        logger.error(f"Нет токена для проверки uuid {uuid}")
         await asyncio.sleep(60)
-        asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
+        asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1))
         return
 
     url = f"https://api.cdek.ru/v2/orders/{uuid}"
@@ -868,69 +931,33 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
             asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
             return
 
-        info = r.json()
-        entity = info.get("entity", {})
-
-        if not entity:
-            logger.warning(f"В ответе СДЭК нет поля 'entity' для uuid {uuid}")
-            await asyncio.sleep(15)
-            asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
-            return
-
-        # Проверка на глобальные ошибки (на верхнем уровне)
-        errors = info.get("errors", [])
-        if errors:
-            err_msg = "; ".join([f"{e.get('code', '—')}: {e.get('message', '—')}" for e in errors])
-            logger.error(f"Глобальные ошибки в uuid {uuid}: {err_msg}")
-            await notify_admin(f"❌ Глобальные ошибки CDEK для #{order_id} (uuid {uuid}): {err_msg}")
-            return
-
-        # Проверка ошибок в запросах
-        for req in info.get("requests", []):
-            req_errors = req.get("errors", [])
-            if req_errors:
-                err_msg = "; ".join([f"{e.get('code', '—')}: {e.get('message', '—')}" for e in req_errors])
-                logger.error(f"Ошибки в request {req.get('request_uuid')}: {err_msg}")
-                await notify_admin(f"❌ Ошибки в запросе CDEK для #{order_id} (uuid {uuid}): {err_msg}")
-                return
-
+        data = r.json()
+        entity = data.get("entity", {})
         cdek_number = entity.get("cdek_number")
-        internal_number = entity.get("number")
-        status_obj = entity.get("status", {})
-        status_code = status_obj.get("code")
-        status_desc = status_obj.get("description", "—")
-
-        logger.info(
-            f"Попытка {attempt + 1}/{max_attempts} | uuid {uuid} → "
-            f"internal={internal_number} | cdek_number={cdek_number} | "
-            f"status={status_code} ({status_desc})"
-        )
 
         if cdek_number and len(str(cdek_number)) >= 8:
-
             engine = make_engine(Config.DB_PATH)
+
             with Session(engine) as sess:
-                # Заново получаем свежий объект внутри активной сессии
                 order = sess.get(Order, order_id)
                 if not order:
                     logger.error(f"Заказ #{order_id} исчез во время polling")
                     return
 
-                # Все изменения делаем внутри with-сессии
+                # Всё делаем внутри сессии
                 order.track = cdek_number
                 if not order.extra_data:
                     order.extra_data = {}
                 order.extra_data["cdek_number"] = cdek_number
-                order.extra_data["cdek_final_status"] = status_code
+                order.extra_data["cdek_final_status"] = entity.get("status", {}).get("code")
                 order.status = OrderStatus.SHIPPED.value
                 flag_modified(order, "extra_data")
 
-                # Сохраняем user_id сейчас, пока сессия жива
-                user_id = order.user_id
+                user_id = order.user_id  # сохраняем до commit
 
                 sess.commit()
 
-            # Всё, что требует order.user_id — делаем ПОСЛЕ commit и закрытия сессии
+            # Всё, что требует bot.send_message — уже после commit
             await bot.send_message(
                 user_id,
                 f"Посылка отправлена! 🚚\n\n"
@@ -938,20 +965,16 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
                 f"<a href='https://www.cdek.ru/ru/tracking?order_id={cdek_number}'>Отследить посылку</a>",
                 parse_mode="HTML",
                 disable_web_page_preview=True,
-                reply_markup=kb_order_status(order)  # ← здесь order уже не нужен, можно убрать или передать id
+                reply_markup=await kb_order_status_by_id(order_id)  # ← await обязательно!
             )
 
-            await notify_admin(
-                f"✅ Заказ #{order_id} → реальный трек получен: {cdek_number}\n"
-                f"Статус: {status_desc} ({status_code})"
-            )
+            await notify_admin(f"✅ Заказ #{order_id} → реальный трек: {cdek_number}")
+            return
 
-            return  # Успех — выходим
-
-        # Если трека ещё нет — ждём
+        # если трека ещё нет — следующая попытка
         delay = min(10 + attempt * 5, 60)
         await asyncio.sleep(delay)
-        asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1, max_attempts))
+        asyncio.create_task(poll_cdek_order_status(uuid, order_id, attempt + 1))
 
     except Exception as e:
         logger.exception(f"Ошибка в poll_cdek_order_status (попытка {attempt + 1}) для uuid {uuid}")
@@ -1192,7 +1215,7 @@ async def notify_client_order_shipped(order_id: int, message: Message):
         text,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=kb_order_status(order)
+        reply_markup=kb_order_status_by_id(order)
     )
 
 
@@ -1355,42 +1378,6 @@ def kb_ready_message(order: Order) -> InlineKeyboardMarkup:
         [{"text": "Оплатить остаток", "callback_data": f"pay:rem:{order.id}"}],
         [{"text": "Статус заказа", "callback_data": f"order:{order.id}"}],
     ])
-
-
-def kb_order_status(order: Order) -> InlineKeyboardMarkup:
-    buttons = []
-
-    # Отслеживание — только если трек реальный (не UUID и не пустой)
-    if order.track and order.track not in ("—", None, "") and not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', order.track, re.I):
-        buttons.append([{
-            "text": "Отследить посылку",
-            "url": f"https://www.cdek.ru/ru/tracking?order_id={order.track}"
-        }])
-    elif order.status == OrderStatus.CDEK_PENDING_REGISTRATION.value:
-        # Placeholder для pending
-        buttons.append([{
-            "text": "Заказ обрабатывается, трек скоро придёт!",
-            "callback_data": "noop"  # Просто закрыть, без действия
-        }])
-
-    show_remainder = (
-        order.payment_kind == "pre" and
-        order.status in (OrderStatus.PAID_PARTIALLY.value, OrderStatus.ASSEMBLED.value) and
-        (order.remainder_amount or 0) > 0
-    )
-
-    if show_remainder:
-        remainder_rub = (order.total_price_kop // 100) - (order.total_price_kop * Config.PREPAY_PERCENT // 10000)
-        buttons.append([{
-            "text": f"Оплатить остаток ({remainder_rub} ₽)",
-            "callback_data": f"pay:rem:{order.id}"
-        }])
-
-    # Всегда показываем информацию о заказе и меню
-    buttons.append([{"text": "Информация о заказе", "callback_data": f"order:{order.id}"}])
-    buttons.append([{"text": "В меню", "callback_data": CallbackData.MENU.value}])
-
-    return create_inline_keyboard(buttons)
 
 
 def kb_orders_list(order_ids: List[int]) -> InlineKeyboardMarkup:
@@ -2262,7 +2249,7 @@ async def cb_order_status(cb: CallbackQuery):
             text,
             parse_mode="HTML",
             disable_web_page_preview=True,
-            reply_markup=kb_order_status(order)
+            reply_markup=kb_order_status_by_id(order)
         )
         await cb.answer()
     except Exception as e:
@@ -4220,7 +4207,10 @@ async def check_all_shipped_orders():
 
                     # Если трек всё ещё UUID — перезапускаем polling
                     if order.status == OrderStatus.SHIPPED.value and re.match(
-                            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', order.track or '', re.I):
+                            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+                            order.track or '',
+                            re.IGNORECASE
+                    ):
                         uuid_to_poll = order.extra_data.get("cdek_uuid")
                         if uuid_to_poll:
                             logger.info(f"Заказ #{order.id} в SHIPPED, но track=uuid → перезапуск polling")
@@ -4268,7 +4258,7 @@ async def check_all_shipped_orders():
                             f"<a href='https://www.cdek.ru/ru/tracking?order_id={cdek_number}'>Отследить посылку</a>",
                             parse_mode="HTML",
                             disable_web_page_preview=True,
-                            reply_markup=kb_order_status(order)
+                            reply_markup=await kb_order_status_by_id(order.id)
                         )
                         logger.info(f"Трек-номер отправлен клиенту по заказу #{order.id}: {cdek_number}")
 
@@ -4438,7 +4428,7 @@ async def handle_payment_success(message: Message):
         # Проверяем, не оплачен ли уже
         if order.status in (OrderStatus.PAID_FULL.value, OrderStatus.SHIPPED.value, OrderStatus.ARCHIVED.value):
             await message.answer("Заказ уже оплачен и обрабатывается ❤️")
-            await message.answer(format_client_order_info(order), reply_markup=kb_order_status(order))
+            await message.answer(format_client_order_info(order), reply_markup=kb_order_status_by_id(order))
             return
 
         # Критично: проверяем реальный статус платежа в ЮKассе
@@ -4496,7 +4486,7 @@ async def handle_payment_success(message: Message):
             await message.answer("Ошибка проверки оплаты. Админ уже уведомлён, скоро разберёмся.")
 
     await message.answer(text)
-    await message.answer(format_client_order_info(order), reply_markup=kb_order_status(order))
+    await message.answer(format_client_order_info(order), reply_markup=kb_order_status_by_id(order))
 
 
 # ───────────────────────────────────────────────
@@ -4594,7 +4584,7 @@ async def yookassa_webhook(request: Request):
                     f"✅ Оплата прошла успешно! Заказ <b>#{order.id}</b> принят в обработку.\n\n"
                     f"Статус обновлён автоматически.",
                     parse_mode="HTML",
-                    reply_markup=kb_order_status(order)
+                    reply_markup=kb_order_status_by_id(order)
                 )
 
                 logger.info(f"Успешно обработан payment.succeeded для заказа #{order.id} → {order.status}")
