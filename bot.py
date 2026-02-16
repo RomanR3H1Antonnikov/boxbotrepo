@@ -906,15 +906,17 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
             f"status={status_code} ({status_desc})"
         )
 
-        # Успех — появился настоящий cdek_number
-        if cdek_number and len(str(cdek_number)) >= 8:  # обычно 10–12 цифр
+        if cdek_number and len(str(cdek_number)) >= 8:
+
             engine = make_engine(Config.DB_PATH)
             with Session(engine) as sess:
+                # Заново получаем свежий объект внутри активной сессии
                 order = sess.get(Order, order_id)
                 if not order:
                     logger.error(f"Заказ #{order_id} исчез во время polling")
                     return
 
+                # Все изменения делаем внутри with-сессии
                 order.track = cdek_number
                 if not order.extra_data:
                     order.extra_data = {}
@@ -922,16 +924,21 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
                 order.extra_data["cdek_final_status"] = status_code
                 order.status = OrderStatus.SHIPPED.value
                 flag_modified(order, "extra_data")
+
+                # Сохраняем user_id сейчас, пока сессия жива
+                user_id = order.user_id
+
                 sess.commit()
 
+            # Всё, что требует order.user_id — делаем ПОСЛЕ commit и закрытия сессии
             await bot.send_message(
-                order.user_id,
+                user_id,
                 f"Посылка отправлена! 🚚\n\n"
                 f"Трек-номер: <code>{cdek_number}</code>\n"
                 f"<a href='https://www.cdek.ru/ru/tracking?order_id={cdek_number}'>Отследить посылку</a>",
                 parse_mode="HTML",
                 disable_web_page_preview=True,
-                reply_markup=kb_order_status(order)
+                reply_markup=kb_order_status(order)  # ← здесь order уже не нужен, можно убрать или передать id
             )
 
             await notify_admin(
