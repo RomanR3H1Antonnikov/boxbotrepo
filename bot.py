@@ -273,28 +273,35 @@ async def get_available_tariffs(
         return []
 
 
-def choose_tariff(available: List[dict]) -> Optional[int]:
+def choose_tariff(available: List[dict], to_point_is_pvz: bool = True) -> Optional[int]:
     if not available:
         return None
 
-    # Приоритет для юрлица ПВЗ→ПВЗ по России (именно то, что тебе нужно)
-    preferred_order = [62, 482, 3, 57, 58, 138, 123]   # 62 — лучший баланс цена/скорость
+    preferred_order = [137, 233, 136, 482, 3, 57, 58, 138, 123]  # 137 и 233 — самые частые для ПВЗ
 
+    # Если доставка в ПВЗ — берём только подходящие режимы
+    if to_point_is_pvz:
+        allowed_modes = [2, 4]  # 2 = склад → ПВЗ, 4 = ПВЗ → ПВЗ
+        candidates = [t for t in available if t.get('delivery_mode') in allowed_modes]
+        logger.info(f"Фильтр для ПВЗ: оставлено {len(candidates)} тарифов из {len(available)}")
+    else:
+        candidates = available
+
+    # Ищем приоритетный среди разрешённых
     for pref in preferred_order:
-        for t in available:
+        for t in candidates:
             if t.get('tariff_code') == pref:
-                logger.info(f"✅ Выбран тариф {pref} — {t.get('tariff_name', '')}")
+                logger.info(f"✅ Выбран приоритетный тариф {pref} — {t.get('tariff_name', '')}")
                 return pref
 
-    # Fallback — любой самый дешёвый ПВЗ-ПВЗ (delivery_mode=4)
-    candidates = [t for t in available if t.get('delivery_mode') == 4]
+    # Если ничего из preferred — самый дешёвый из разрешённых
     if candidates:
         candidates.sort(key=lambda t: t.get('delivery_sum', 999999))
         selected = candidates[0]['tariff_code']
-        logger.info(f"Выбран cheapest ПВЗ-ПВЗ тариф {selected}")
+        logger.info(f"Выбран самый дешёвый разрешённый тариф {selected}")
         return selected
 
-    # Совсем последний fallback
+    # Последний fallback — любой
     cheapest = min(available, key=lambda t: t.get('delivery_sum', 999999))
     logger.info(f"Fallback на любой тариф {cheapest['tariff_code']}")
     return cheapest['tariff_code']
@@ -335,7 +342,7 @@ async def calculate_cdek_delivery_cost(
             logger.warning(f"Нет доступных тарифов для ПВЗ {pvz_code} (город {city_code})")
             return None
 
-        tariff = choose_tariff(available)
+        tariff = choose_tariff(available, to_point_is_pvz=True)
         if not tariff:
             logger.warning("Не найден подходящий тариф")
             return None
@@ -807,7 +814,7 @@ async def create_cdek_order(order_id: int, tariff_code: int) -> bool:
             order.extra_data["cdek_uuid"] = uuid
             flag_modified(order, "extra_data")
             order.track = uuid  # временно для UI
-            order.status = OrderStatus.CDEK_PENDING_REGISTRATION.value
+            order.status = OrderStatus.SHIPPED.value
             sess.commit()
 
         logger.info(f"СДЭК: ЗАКАЗ #{order_id} ПРИНЯТ (202 Accepted) | UUID: {uuid} → запускаем polling")
@@ -934,6 +941,11 @@ async def poll_cdek_order_status(uuid: str, order_id: int, attempt: int = 0, max
         data = r.json()
         entity = data.get("entity", {})
         cdek_number = entity.get("cdek_number")
+        statuses = entity.get("statuses", [])
+        current_status_desc = statuses[-1].get("name", "—") if statuses else "—"
+        logger.info(f"Polling uuid={uuid} → statuses={[s['code'] for s in statuses]} | cdek_number={cdek_number}")
+
+        logger.info(f"Polling: uuid={uuid} → status={current_status_desc}")
 
         if cdek_number and len(str(cdek_number)) >= 8:
             engine = make_engine(Config.DB_PATH)
@@ -2526,7 +2538,7 @@ async def cb_admin_set_shipped(cb: CallbackQuery):
             )
 
             is_local = (order.extra_data.get("city_code") == Config.CDEK_FROM_CITY_CODE)
-            tariff = choose_tariff(available)
+            tariff = choose_tariff(available, to_point_is_pvz=True)
             if not tariff:
                 msg = f"Нет подходящих тарифов для ПВЗ {pvz_code} (город {city_code}). Доступны: {available}"
                 logger.warning(msg)
@@ -4235,8 +4247,8 @@ async def check_all_shipped_orders():
 
                     cdek_number     = entity.get("cdek_number")
                     internal_number = entity.get("number")
-                    status_obj      = entity.get("status", {})
-                    current_status_desc = status_obj.get("description", "")
+                    statuses = entity.get("statuses", [])
+                    current_status_desc = statuses[-1].get("name", "—") if statuses else "—"
 
                     logger.info(
                         f"check_all: #{order.id} → internal={internal_number} | "
