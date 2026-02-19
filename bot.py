@@ -1939,40 +1939,34 @@ async def cb_single_practice(cb: CallbackQuery):
             logger.info(f"[PRACTICE_SINGLE] Практика: {title} (idx={idx}) | action={action}")
 
             if action == "play":
-                # 1. Вступительное видео/кружочек
+                logger.info(f"[PRACTICE_PLAY] Запуск практики #{idx} '{title}'")
+
+                # 1. Вступительное видео/кружочек (если есть)
                 note_id = Config.PRACTICE_NOTES.get(idx)
                 if note_id:
                     try:
-                        logger.info(f"[PRACTICE_SINGLE] Отправляем вступительное видео_note {note_id}")
                         await cb.message.answer_video_note(note_id)
                     except Exception as e:
-                        logger.error(f"[PRACTICE_SINGLE] Ошибка вступительного видео_note {idx}: {e}")
+                        logger.error(f"Ошибка вступительного видео_note {idx}: {e}")
 
-                # 2. Описание
-                try:
-                    await send_practice_intro(cb.message, idx, title)
-                except Exception as e:
-                    logger.error(f"[PRACTICE_SINGLE] Ошибка отправки описания практики {idx}: {e}")
-
-                # 3. Основное видео с кнопкой назад
-                video_id = None
-                if idx < len(Config.PRACTICE_VIDEO_IDS):
-                    video_id = Config.PRACTICE_VIDEO_IDS[idx]
+                # 2. Основное видео (если есть)
+                video_id = Config.PRACTICE_VIDEO_IDS[idx] if idx < len(Config.PRACTICE_VIDEO_IDS) else None
                 if video_id:
                     try:
-                        logger.info(f"[PRACTICE_SINGLE] Отправляем основное видео_note {video_id}")
                         await cb.message.answer_video_note(video_id)
                         await cb.message.answer("Практика запущена ↓", reply_markup=kb_back_to_practices())
                     except Exception as e:
-                        logger.error(f"[PRACTICE_SINGLE] Ошибка основного видео {idx}: {e}")
+                        logger.error(f"Ошибка основного видео {idx}: {e}")
 
-                # 4. Бонус-аудио с кнопкой назад
-                bonus_audio = None
-                if idx < len(Config.PRACTICE_BONUS_AUDIO):
-                    bonus_audio = Config.PRACTICE_BONUS_AUDIO[idx]
+                # 3. Бонус-аудио (только у 6-й практики)
+                bonus_audio = Config.PRACTICE_BONUS_AUDIO[idx] if idx < len(Config.PRACTICE_BONUS_AUDIO) else None
                 if bonus_audio:
                     try:
-                        logger.info(f"[PRACTICE_SINGLE] Отправляем бонус-аудио для {idx}")
+                        if idx == 5:  # «Созидать жизнь»
+                            await cb.message.answer(
+                                "🎁 <b>Бонус.</b> Слушать первым в «Созидать жизнь»",
+                                parse_mode="HTML"
+                            )
                         await cb.message.answer_audio(
                             audio=bonus_audio,
                             title=f"{title} — Бонус",
@@ -1980,19 +1974,15 @@ async def cb_single_practice(cb: CallbackQuery):
                             duration=300,
                             reply_markup=kb_back_to_practices()
                         )
-                        await asyncio.sleep(1.5)
+                        await asyncio.sleep(1.2)  # приятная пауза
                     except Exception as e:
-                        logger.error(f"[PRACTICE_SINGLE] Ошибка бонус-аудио {idx}: {e}")
+                        logger.error(f"Ошибка бонус-аудио {idx}: {e}")
 
-                # 5. Основное аудио с кнопкой назад
-                audio_id = None
-                if idx < len(Config.PRACTICE_AUDIO_IDS):
-                    audio_id = Config.PRACTICE_AUDIO_IDS[idx]
+                # 4. Основное аудио (для всех кроме 6-й)
+                audio_id = Config.PRACTICE_AUDIO_IDS[idx] if idx < len(Config.PRACTICE_AUDIO_IDS) else None
                 if audio_id:
                     try:
                         duration_minutes = Config.PRACTICE_DETAILS[idx]["duration"]
-                        logger.info(
-                            f"[PRACTICE_SINGLE] Отправляем основное аудио {audio_id} (длительность ~{duration_minutes} мин)")
                         await cb.message.answer_audio(
                             audio=audio_id,
                             title=title,
@@ -2001,33 +1991,36 @@ async def cb_single_practice(cb: CallbackQuery):
                             reply_markup=kb_back_to_practices()
                         )
                     except Exception as e:
-                        logger.error(f"[PRACTICE_SINGLE] Ошибка основного аудио {idx}: {e}")
+                        logger.error(f"Ошибка основного аудио {idx}: {e}")
                         await cb.message.answer("Не удалось загрузить основное аудио 😔")
 
-                # Завершение (как раньше, но можно добавить кнопку если нужно)
+                # 5. Финальное сообщение
                 try:
                     await cb.message.answer(
-                        "Практика завершена! ✨\n\nХочешь повторить или перейти к следующей?",
+                        "Практика завершена! ✨\n\n"
+                        "Хочешь повторить или перейти к следующей?",
                         reply_markup=kb_practices_list(user.practices)
                     )
                 except Exception as e:
-                    logger.error(f"[PRACTICE_SINGLE] Ошибка финального сообщения: {e}")
+                    logger.error(f"Ошибка финального сообщения: {e}")
 
-                await cb.answer("Практика началась!")
+                await cb.answer("Практика началась! ✨")
 
-            else:  # Просто открытие карточки
-                logger.info(f"[PRACTICE_SINGLE] Открываем карточку практики {idx}")
+            else:
+                # === Просто открытие карточки (без запуска) ===
+                logger.info(f"[PRACTICE_CARD] Открываем карточку #{idx} '{title}'")
                 try:
-                    await send_practice_intro(cb.message, idx, title)
+                    await send_practice_intro(cb.message, idx, title)  # ← ТОЛЬКО ЗДЕСЬ!
                     await cb.message.answer(
                         f"<b>{title}</b>\n\nГотовы приступить к практике?",
                         reply_markup=kb_practice_card(idx)
                     )
                 except Exception as e:
-                    logger.error(f"[PRACTICE_SINGLE] Ошибка при показе карточки {idx}: {e}")
-                    await cb.message.answer("Не удалось показать описание практики 😔")
+                    logger.error(f"Ошибка карточки {idx}: {e}")
+                    await cb.message.answer("Не удалось показать описание 😔")
 
             await cb.answer()
+            
 
     except Exception as e:
         logger.exception(f"[PRACTICE_SINGLE] Критическая ошибка обработки практики | user_id={cb.from_user.id} | data={cb.data}")
