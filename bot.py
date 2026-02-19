@@ -506,7 +506,7 @@ class Config:
         None,
         os.getenv("AUDIO4_ID"),
         os.getenv("AUDIO5_ID"),
-        None,
+        os.getenv("AUDIO6_ID"),
         os.getenv("AUDIO7_ID"),
     ]
     PRACTICE_BONUS_AUDIO = [
@@ -1964,7 +1964,7 @@ async def cb_single_practice(cb: CallbackQuery):
                     try:
                         if idx == 5:  # «Созидать жизнь»
                             await cb.message.answer(
-                                "🎁 <b>Бонус.</b> Слушать первым в «Созидать жизнь»",
+                                "Бонус. Слушать первым в «Созидать жизнь»",
                                 parse_mode="HTML"
                             )
                         await cb.message.answer_audio(
@@ -2020,7 +2020,7 @@ async def cb_single_practice(cb: CallbackQuery):
                     await cb.message.answer("Не удалось показать описание 😔")
 
             await cb.answer()
-            
+
 
     except Exception as e:
         logger.exception(f"[PRACTICE_SINGLE] Критическая ошибка обработки практики | user_id={cb.from_user.id} | data={cb.data}")
