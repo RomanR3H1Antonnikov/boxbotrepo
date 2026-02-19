@@ -1197,37 +1197,43 @@ async def notify_admins_order_address_changed(order: Order):
     )
 
 
-async def notify_client_order_assembled(order_id: int, message: Message):
+async def notify_client_order_assembled(order_id: int):
+    """Отправляет клиенту сообщение «Собран»"""
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         order = sess.get(Order, order_id)
-        if order is None:
-            logger.warning(f"Заказ {order_id} не найден при уведомлении клиента")
+        if not order:
             return
 
-    text = format_client_order_info(order)
-    await message.answer(
+        text = format_client_order_info(order)
+        # kb = kb_ready_message(order)          # кнопка «Оплатить остаток» если нужно
+
+    await bot.send_message(
+        order.user_id,
         text,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=kb_ready_message(order)
+        # reply_markup=kb
     )
 
 
-async def notify_client_order_shipped(order_id: int, message: Message):
+async def notify_client_order_shipped(order_id: int):
+    """Отправляет клиенту сообщение «Отправлен»"""
     engine = make_engine(Config.DB_PATH)
     with Session(engine) as sess:
         order = sess.get(Order, order_id)
-        if order is None:
-            logger.warning(f"Заказ {order_id} не найден при уведомлении об отправке")
+        if not order:
             return
 
-    text = format_client_order_info(order)
-    await message.answer(
+        text = format_client_order_info(order)
+        kb = await kb_order_status_by_id(order.id)
+
+    await bot.send_message(
+        order.user_id,
         text,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=await kb_order_status_by_id(order.id)
+        reply_markup=kb
     )
 
 
@@ -1598,7 +1604,6 @@ async def cmd_menu(message: Message):
         user = get_user_by_id(sess, message.from_user.id)
         if user:
             reset_states(user, sess)
-            await message.answer("Все черновики заказов отменены. Если был незавершённый заказ - он отменён. Оплаченные заказы вы можете найти в Личном кабинете")
     await message.answer("Выбери действие:", reply_markup=kb_main())
 
 @r.message(Command("admin_panel"))
@@ -1648,7 +1653,6 @@ async def cb_menu(cb: CallbackQuery):
 
         # Если ничего активного нет — спокойно сбрасываем и идём в меню
         reset_states(user)
-        await cb.message.answer("Все черновики (если были) отменены.")
 
     await edit_or_send(cb.message, "Выбери действие:", kb_main())
     await cb.answer()
@@ -2493,7 +2497,7 @@ async def cb_admin_set_assembled(cb: CallbackQuery):
             sess.commit()
 
         # Уведомление клиенту о сборке
-        await notify_client_order_assembled(oid, cb.message)  # Переименуй функцию на notify_client_order_assembled если хочешь
+        await notify_client_order_assembled(oid)
         await edit_or_send(cb.message, f"Заказ #{oid} собран.", kb_admin_panel())
         await cb.answer()
 
@@ -2555,7 +2559,7 @@ async def cb_admin_set_shipped(cb: CallbackQuery):
             # Перезагружаем order после создания (он уже SHIPPED)
             order = sess.get(Order, oid)
 
-        await notify_client_order_shipped(order.id, cb.message)
+        await notify_client_order_shipped(order.id)
         await edit_or_send(cb.message, f"Заказ #{oid} отправлен.", kb_admin_panel())
         await cb.answer("Отправлено!")
 
