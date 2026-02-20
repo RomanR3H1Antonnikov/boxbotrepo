@@ -1954,7 +1954,7 @@ async def cb_single_practice(cb: CallbackQuery):
                 if video_id:
                     try:
                         await cb.message.answer_video_note(video_id)
-                        await cb.message.answer("Практика запущена ↓", reply_markup=kb_back_to_practices())
+                        await cb.message.answer("Практика запущена ↓")  # без клавиатуры здесь
                     except Exception as e:
                         logger.error(f"Ошибка основного видео {idx}: {e}")
 
@@ -1964,7 +1964,7 @@ async def cb_single_practice(cb: CallbackQuery):
                     try:
                         if idx == 5:  # «Созидать жизнь»
                             await cb.message.answer(
-                                "Бонус. Слушать первым в «Созидать жизнь»",
+                                "Первое аудио-послание подготовит тебя ко второму. Слушай по порядку:",
                                 parse_mode="HTML"
                             )
                         await cb.message.answer_audio(
@@ -1972,7 +1972,6 @@ async def cb_single_practice(cb: CallbackQuery):
                             title=f"{title} — Бонус",
                             performer=Config.PRACTICE_PERFORMERS[idx],
                             duration=300,
-                            reply_markup=kb_back_to_practices()
                         )
                         await asyncio.sleep(1.2)  # приятная пауза
                     except Exception as e:
@@ -1988,13 +1987,12 @@ async def cb_single_practice(cb: CallbackQuery):
                             title=title,
                             performer=Config.PRACTICE_PERFORMERS[idx],
                             duration=duration_minutes * 60,
-                            reply_markup=kb_back_to_practices()
                         )
                     except Exception as e:
                         logger.error(f"Ошибка основного аудио {idx}: {e}")
                         await cb.message.answer("Не удалось загрузить основное аудио 😔")
 
-                # 5. Финальное сообщение
+                # 5. Финальное сообщение — здесь клавиатура
                 try:
                     await cb.message.answer(
                         "Практика завершена! ✨\n\n"
