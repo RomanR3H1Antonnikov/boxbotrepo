@@ -542,6 +542,23 @@ class Config:
     )
     PAYMENT_TIMEOUT_SEC = 600
 
+    GALLERY_PHOTOS_1 = [  # первые 6 фото
+        "AgACAgIAAxkBAAIyrWmaBt9N5PJtUkKPDmVbvu3nIAtOAALGGGsb8I7QSCKLpitp8eUhAQADAgADeQADOgQ",
+        "AgACAgIAAxkBAAIytmmaCqKMYrlAgWXO9g0cmFTnW54TAALdGGsb8I7QSKaV3BKWb_N5AQADAgADeQADOgQ",
+        "AgACAgIAAxkBAAIyuGmaCrA9MQyj1Urhd5B7c1Xn8O78AALgGGsb8I7QSP5ZRRZ6WvgCAQADAgADeQADOgQ",
+        "AgACAgIAAxkBAAIyummaCsfrR-hKbti9hxq2PsATn8KKAALkGGsb8I7QSLT3024-SEBgAQADAgADeQADOgQ",
+        "AgACAgIAAxkBAAIyvGmaCtaP_dm_k9UBmW3z1Ln4btfOAALnGGsb8I7QSJIM9-B8KTVkAQADAgADeQADOgQ",
+        "AgACAgIAAxkBAAIyvmmaCug0RMd-0eA9SR4nSOSnB_VEAALqGGsb8I7QSP0xZF4JvtGCAQADAgADeQADOgQ",
+    ]
+
+    GALLERY_PHOTOS_2 = [  # оставшиеся 5 фото
+        "AgACAgIAAxkBAAIywGmaCvFF1ch13rnVGaz6M5vmt02DAALsGGsb8I7QSK4ZJNz5pE7YAQADAgADeQADOgQ",
+        "AgACAgIAAxkBAAIywmmaDcp35-BAAAE2wFXJJPRe7C6tAQACGBlrG_CO0Eg14PotbcgMMQEAAwIAA3kAAzoE",
+        "AgACAgIAAxkBAAIyxGmaDdK8d2vF1VqGjxJb6KeXs3gbAAIZGWsb8I7QSEi-r0SWzwzjAQADAgADeQADOgQ",
+        "AgACAgIAAxkBAAIyxmmaDdepTry39St1C8t3liFEaxrqAAIaGWsb8I7QSPhm6vUHy7e0AQADAgADeQADOgQ",
+        "AgACAgIAAxkBAAIyyGmaDd9xVq_zTPN5pYUctkKW9W9qAAIbGWsb8I7QSP27ViDAqjRrAQADAgADeQADOgQ",
+    ]
+
     # Склад в СДЭК (код города). Москва = 44, СПб = 137, Екат = 195 и т.д.
     CDEK_FROM_CITY_CODE = os.getenv("CDEK_FROM_CITY_CODE", "44")  # по умолчанию Москва
     CDEK_SHIPMENT_POINT_CODE = "MSK2296"
@@ -1755,10 +1772,40 @@ async def cb_gallery(cb: CallbackQuery):
             await cb.message.answer_document(document=Config.VIDEO3_ID, caption="Видео 3 - Часть 1")
             await cb.message.answer_document(document=Config.VIDEO4_ID, caption="Видео 4 - Часть 2")
             await cb.message.answer_document(document=Config.VIDEO5_ID, caption="Видео 5 - Часть 3")
-        except Exception as e:
-            logger.error(f"Failed to send gallery videos: {e}")
-            await cb.message.answer("Ошибка при загрузке видео. Свяжитесь с администратором.")
 
+            await asyncio.sleep(0.5)
+
+            # Подпись перед первой группой
+            await cb.message.answer(
+                "Немного нашей атмосферы и заботы внутри\n"
+                "Вот что ждёт тебя в коробочке:"
+            )
+
+            # Первая группа (6 фото)
+            if Config.GALLERY_PHOTOS_1:
+                media_group_1 = [
+                    types.InputMediaPhoto(
+                        media=file_id,
+                        caption=" " if i == 0 else None  # подпись только под первой
+                    )
+                    for i, file_id in enumerate(Config.GALLERY_PHOTOS_1)
+                ]
+                media_group_1[0].caption = "Вот такая красота внутри"
+                await cb.message.answer_media_group(media=media_group_1)
+
+            # Вторая группа (5 фото) — без дополнительной подписи
+            if Config.GALLERY_PHOTOS_2:
+                media_group_2 = [
+                    types.InputMediaPhoto(media=file_id)
+                    for file_id in Config.GALLERY_PHOTOS_2
+                ]
+                await cb.message.answer_media_group(media=media_group_2)
+
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке медиа в gallery: {e}")
+            await cb.message.answer("Не удалось загрузить часть материалов 😔")
+
+        # Финальный текст + клавиатура
         await cb.message.answer(Config.GALLERY_TEXT, reply_markup=kb_gallery())
 
         user.gallery_viewed = True
