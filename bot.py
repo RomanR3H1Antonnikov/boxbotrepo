@@ -23,7 +23,7 @@ from db.repo import (
 from db.models import Order
 from yookassa import Configuration, Payment
 from yookassa.domain.notification import WebhookNotification
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import Bot, Dispatcher, Router, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
