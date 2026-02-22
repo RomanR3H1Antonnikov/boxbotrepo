@@ -582,7 +582,8 @@ ADMIN_USERNAMES = {"@RE_HY",
                    "@anbolshakowa",
                    "@dmitrieva_live",
                    }
-MAIN_ADMIN_IDS = {1049170524}
+MAIN_ADMIN_IDS = {1049170524,
+                  }
 ADMIN_ID = 1049170524
 
 # ========== BOOTSTRAP ==========
@@ -1081,34 +1082,40 @@ def get_order_admin(order_id: int) -> Optional[Order]:
         return sess.get(Order, order_id)
 
 
-async def is_admin(message_or_callback: Message | CallbackQuery) -> bool:
-    if isinstance(message_or_callback, Message):
-        user = message_or_callback.from_user
+async def is_admin(obj: Message | CallbackQuery) -> bool:
+    if isinstance(obj, Message):
+        user = obj.from_user
     else:  # CallbackQuery
-        user = message_or_callback.from_user
+        user = obj.from_user
 
     uid = user.id
     username = user.username
 
-    # 1. Проверка по ID (самая надёжная)
+    # 1. Самая надёжная проверка — по ID
     if uid in MAIN_ADMIN_IDS:
-        logger.info(f"Доступ разрешён по ID: {uid}")
+        logger.info(f"Admin access GRANTED by ID: {uid} (@{username or 'нет'})")
         return True
 
-    # 2. Проверка по username (удобно для команды)
-    if username and f"@{username}" in ADMIN_USERNAMES:
-        logger.info(f"Доступ разрешён по username: @{username}")
+    # 2. Резервная проверка по username (если ID ещё не добавили)
+    if username and f"@{username.lower()}" in {u.lower() for u in ADMIN_USERNAMES}:
+        logger.info(f"Admin access GRANTED by username: @{username}")
         return True
 
-    logger.info(f"Доступ запрещён: uid={uid}, username=@{username or 'нет'}")
+    logger.info(f"Admin access DENIED: uid={uid}, username=@{username or 'нет'}")
 
-    # Сообщение пользователю
-    if isinstance(message_or_callback, Message):
-        await message_or_callback.answer("Доступ запрещён. Только для администраторов.")
-    elif isinstance(message_or_callback, CallbackQuery):
-        await message_or_callback.answer("Доступ запрещён", show_alert=True)
+    # Ответ пользователю
+    if isinstance(obj, Message):
+        await obj.answer("Доступ запрещён. Это панель только для администраторов.")
+    else:
+        await obj.answer("Доступ запрещён", show_alert=True)
 
     return False
+
+
+@r.message(Command("myid"))
+async def cmd_myid(message: Message):
+    await message.answer(f"Ваш Telegram ID: <code>{message.from_user.id}</code>")
+
 
 async def notify_admin(text: str):
     for admin_id in MAIN_ADMIN_IDS:
@@ -1776,12 +1783,6 @@ async def cb_gallery(cb: CallbackQuery):
 
             await asyncio.sleep(0.5)
 
-            # Подпись перед первой группой
-            await cb.message.answer(
-                "Немного нашей атмосферы и заботы внутри\n"
-                "Вот что ждёт тебя в коробочке:"
-            )
-
             # Первая группа (6 фото)
             if Config.GALLERY_PHOTOS_1:
                 media_group_1 = [
@@ -1791,7 +1792,6 @@ async def cb_gallery(cb: CallbackQuery):
                     )
                     for i, file_id in enumerate(Config.GALLERY_PHOTOS_1)
                 ]
-                media_group_1[0].caption = "Вот такая красота внутри"
                 await cb.message.answer_media_group(media=media_group_1)
 
             # Вторая группа (5 фото) — без дополнительной подписи
