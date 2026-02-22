@@ -1578,24 +1578,41 @@ async def on_start(message: Message):
     await send_greeting_circle(message)
     await message.answer("Выбери действие:", reply_markup=kb_main())
 
+
 @r.message(Command("grab_id"))
 async def grab_id(message: Message):
     src = message.reply_to_message
     if not src:
-        await message.answer("Сделайте /grab_id ответом на сообщение с медиа.")
+        await message.answer("Ответь /grab_id на сообщение с фото/видео/аудио.")
         return
 
-    if src.video or src.video_note:
+    collected = []
+
+    # Если это одиночное фото
+    if src.photo:
+        file_id = src.photo[-1].file_id  # самое большое разрешение
+        collected.append(f"photo: {file_id}")
+
+    # Если это документ (иногда фото приходят как document)
+    elif src.document and src.document.mime_type.startswith("image/"):
+        collected.append(f"photo (document): {src.document.file_id}")
+
+    # Видео/кружок/аудио (оставляем как было)
+    elif src.video or src.video_note:
         file_id = src.video.file_id if src.video else src.video_note.file_id
-        await message.answer(f"file_id видео/кружочка: {file_id}")
+        collected.append(f"video/video_note: {file_id}")
     elif src.audio:
-        await message.answer(f"file_id аудио: {src.audio.file_id}")
+        collected.append(f"audio: {src.audio.file_id}")
     elif src.voice:
-        await message.answer(f"file_id голосового: {src.voice.file_id}")
-    elif src.document:
-        await message.answer(f"file_id документа (аудио?): {src.document.file_id}")
+        collected.append(f"voice: {src.voice.file_id}")
     else:
-        await message.answer("Нет поддерживаемого медиа в ответе.")
+        await message.answer("В ответе нет фото/видео/аудио.")
+        return
+
+    # Если вдруг несколько (хотя обычно одно)
+    text = "Собранные file_id:\n\n" + "\n".join(collected)
+    await message.answer(text)
+
 
 @r.message(Command("menu"))
 async def cmd_menu(message: Message):
