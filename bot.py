@@ -30,7 +30,8 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove,
+    InputMediaPhoto,
 )
 from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
