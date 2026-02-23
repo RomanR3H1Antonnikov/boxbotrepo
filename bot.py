@@ -583,6 +583,8 @@ ADMIN_USERNAMES = {"@RE_HY",
                    "@dmitrieva_live",
                    }
 MAIN_ADMIN_IDS = {1049170524,
+                  495345306,
+                  374545940,
                   }
 ADMIN_ID = 1049170524
 
